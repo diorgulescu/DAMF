@@ -1,0 +1,38 @@
+<root>
+	<errors>
+		<error name='defaulterror' string='This is the error message' type='error' severity='low' resolution=''/>
+		<error name='targetreserved' string='Target reserved by different user!\n'/>
+		<error name='unabletoreserve' string='%s: Unable to reserve target after %s attempts! Action timed out.'/>
+	</errors>
+	<info>
+		<info name='reservationconfirmed' string='%s: Target reserved!'/>
+		<info name='targetalreadyreserved' string = '%s: Target is already reserved by a different user.'/>
+		<info name='reservationattempt' string='Attempting to reserve target %s ...'/>
+		<info name='cannotreserve' string='%s: Could not reserve target. Connection timed out... %s'/>
+		<info name='targetunreserved' string='Target %s was succesfully unreserved.'/>
+	</info>
+	<prompts>
+		<prompt name='oseprompt' string='[a-zA-Z]*ose[^>]*>'/>
+		<prompt name='sabrelite' string='MX6Q SABRELITE U-Boot '/>
+		<prompt name='uboot' string='U-Boot>'/>
+	</prompts>
+	<commands>
+		<command name='reservetarget' string='target %s -r now-+%s'/>
+		<command name='unreservetarget' string='target %s --unreserve_id=%s'/>
+	</commands>
+	<credentials>
+		<auth name='eltfuser' string='eltf'/>
+		<auth name='eltfpassword' string='qwe123'/>
+	</credentials>
+	<paths>
+		<path name='ftphost' string='172.21.3.22:/tftpboot/'/>
+		<path name='httphost' string='172.21.3.22:/homes/systest/public_html/'/>
+		<path name='lmpath' string='/vobs/ose5/system/refsys/test/systest'/>
+	</paths>
+	<urls>
+		<url name='ivtargetdetails' string='http://ivlab/ivlab/targetdetails?target=%s'/>
+	</urls>
+	<db>
+		<database name='host' string='sestorddb01.enea.se'/>
+	</db>
+</root>

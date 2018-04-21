@@ -1,0 +1,15 @@
+errors:
+  default_error: 'An unexpected error was encountered'
+  target_already_reserved: 'Target reserved by different user!'
+  unable_to_reserve: 'Unable to reserve target after %s attempts! Action timed out.'
+  board_unavalable: 'Board unavailable'
+info:
+  reservation_confirmed: '%s: Target reserved!'
+  reservation_attempt: 'Attempting to reserve target %s ...'
+  board_unreserved: 'Target %s was succesfully unreserved.'
+debug:
+  ivlab_attributes: 'IVLab board attributes:'
+commands:
+  reserve_board: 'target %s -r now-+%s'
+  unreserve_board: 'target %s --unreserve_id=%s'
+  target_admin_board_details: 'targetadmin --display --name %s'
