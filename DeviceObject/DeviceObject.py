@@ -90,9 +90,6 @@ class DeviceObject:
         self.bootloader = new_bootloader                        
 
     # METHODS
-    # since we are working on a LAVA replacement, the code written by adgh
-    # will be added here, and altered so that hardcoded strings are migrated to the 
-    # Constants class and things will be split as better as possible.
     # Notes and implementation ideas:
     # - since the "child" object is held and used for managing the pexpect connection,
     # this should be passed along between methods, so that we never disconnect from the board

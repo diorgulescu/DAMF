@@ -186,9 +186,7 @@ class DeviceManager:
     #        self.request_queue.task_done()
 
     def reserve_board(self, board_name, attempts = 3):
-        """Perform the necessary operations for reserving the specified board.
-        Originally written by Mihai Nitu, for IP Performance tests (forked from
-        target.py)"""
+        """Perform the necessary operations for reserving the specified board. Must be moved to the ResourcePool"""
         # ----------------------------------------------------------------------- #
         # This method seems to match the desired reservation behavior. It tries   #
         # to reserve for a given number of tries and, if the operation failes,    #
@@ -210,7 +208,6 @@ class DeviceManager:
         reservation_id = self.run_command(reserve_cmd)
 
         #for i in range(attempts):
-            # reserve_cmd = "eneatool ivlab target -r now-+"+time+" "+self._name -> old way
         #    reserve_cmd = self.constants.COMMANDS["reservetarget"] % ("5M", board_name)
         #    self.logger.debug(reserve_cmd)
             #_shell.sendline(reserve_cmd)
@@ -242,7 +239,6 @@ class DeviceManager:
 
     def unreserve_board(self, board, reservation_id):
         """Erase the specified target reservation ID"""
-        #cmd_string = "eneatool ivlab target " + target + " --unreserve_id=" + reservation_id -> old way
         cmd_string = self.constants.COMMANDS["unreservetarget"] % (board, reservation_id)
         unreserve_result = self.run_command(cmd_string)
 
@@ -252,15 +248,11 @@ class DeviceManager:
         """This is used to get an instance of the BoardObject type, which allows one
         to directly perform operations for that board (power management, image loading, etc)"""
 
-        # Fetch target info from IVLab
-        # TODO: finish migrating from urllib to requests
-        # board_details = self.get_ivlab_target_info(board_name)
-
         # ---------------------------------------------------------------------
         # NB: We need a mechanism to check if the current user has the right to 
         # control the board, based on the reservation or on the error code 
         # that we may receive from the 'target' command
-        # Now, we get a new TargetObject instance with some attributes already
+        # Now, we get a new DeviceObject instance with some attributes already
         # set. This is returned, giving one the ability to easily manage each
         # instance separately.
         # ---------------------------------------------------------------------
@@ -388,8 +380,8 @@ class DeviceManager:
         print("Tests deployed to the board.\nRunning tests...")
 
         # ==========================================================================================
-        # NOTE: The Paramiko library is not compatible with the Dropbear SSH server that ENEA
-        # Linux is currently using (@March 2018). Therefore, we are forced to wrap around existing system command
+        # NOTE: The Paramiko library is not compatible with the Dropbear SSH server. 
+        # Therefore, we are forced to wrap around existing system command
         # utilities in order to get past this limitation. However, code that performs all these
         # operations using Paramiko will be kept here for future reference or use, if needed.        
         #ssh = paramiko.SSHClient() 
