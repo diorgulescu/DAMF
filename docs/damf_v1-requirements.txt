@@ -1,0 +1,28 @@
+DAMF Web App
+=======================
+1) Provide a 'Devices' sections
+In order for the framework to be usable, it must provide a way to easily list, define and manage devices being used. This includes:
+- A page that displays the list of all devices defined within the framework ('/devices')
+- One for creating/defining a new one ('/devices/new')
+- A page for editing an existing device ('/devices/edit') - this will include ways of deleting and exporting the entry
+
+2) Dynamic LAB view
+This should be the last item being developed, since it will entirely rely on all the other parts of the framework being implemented and working properly.
+
+To put it simply, this should be a nice dynamically generated diagram illustrating all the devices currently being in use by the framework. Each element defining a device must be included into proper network/subnet representations, and also arrows, lines or other linking items should display certain relationships with other devices within the lab (for example, one may use two devices for running a set of tests, in which case this has to be clearly visible).
+
+Additionally, the user should be able to view certain details of any given element by simply clicking on it in the diagram.
+
+3) User Dashboard
+All users must be able to see information relevant to them. Once logged in, each user must be able to see:
+- A list of all currently running test jobs they own
+- A test job history
+- One notification area
+- A list of owned devices
+
+4) First run wizard
+Once DAMF is deployed to a new system, an easy way of setting up needs to be available. The administrator must be able to set the following by using a simple wizard:
+- Global framework settings (LDAP integration, email servers to be used, etc.)
+- Global lab attributes (name, scope, etc.)
+- A lab network and additional subnets
+- Administrator account details (name, email, etc)
