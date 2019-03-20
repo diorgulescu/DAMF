@@ -1,4 +1,18 @@
 {% extends "base.html" %}
 
 {% block content %}
+<table class="table">
+<tbody>
+{% for device in devices %}
+<tr>
+	<th scope="row">{{ device.name }}</th>
+<td>{{ device.arch }}</td>
+<td>{{ device.owner }}</td>
+<td>{{ device.state }}</td>
+<td>{{ device.deployed_image }}</td>
+
+</tr>
+{% endfor %}
+</tbody>
+</table>
 {% endblock %}
