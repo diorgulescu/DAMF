@@ -1,30 +1,81 @@
-# Device Automation & Management Framework
+# Device Automation & Management Framework (DAMF)
 
-## Purpose ##
-This framework is aimed at embedded software developers, software testers and lab admins and it strives to provide a unified way of working with the boards available for automated testing. 
-From board lab management tasks to board access provisioning (by viewing each board/device as a resource that can be dinamically allocated from a pool of resources) and test automation, this project is meant to fill a software solution gap that I noticed over the past couple of years.
+## Purpose
+This framework is aimed at embedded software developers, software testers and lab admins and it strives to provide a unified way of working with the boards available for automated testing (Raspberry Pi, Texas Instruments Sitara/AM335x/AM62x/BeagleBone, Linux SBCs, and Android devices).
 
-Every embedded software company has some sort of an internal lab. Interacting with it in an efficient manner involves quite a lot of administration work. Apart from setting everything up and connecting bits & wires, a way of accessing the lab must be provided. In almost all cases, each team/company ends up writing an in-house solution from scratch (which may bring benefits on the short term, but it does so happen that future features and issues are not taken into account due to lack o expertise), and when several companies (or teams within the same company) end up writing their own software for doing the exact same thing, clearly something is wrong.
+From board lab management tasks and network auto-discovery to board access provisioning (viewing each board/device as a resource that can be dynamically allocated from a pool of resources) and test automation, DAMF acts as the layer between the hardware lab and test automation scripts.
 
-This framework is aimed at becoming that layer between the company's lab and the test automation team. By providing simple ways to deal with hardware devices, the test automation engineers can focus on how to write better tests, leaving all the board/device management and interaction work to the framework. Also, lab admins can use this for management tasks, given the fact that DAMF offers a quite easy manner of adding new devices to the resource pool.
+---
 
-## Current status ##
+## Architecture & Features (v2.0)
 
-_For now, this is UNIX-compatible only._
+1. **Importable Python SDK (`damf`)**:
+   - Clean, context-managed `Lab` and `Device` APIs (`with lab.acquire(board_type="raspberry-pi-4") as dev:`) that automatically lock/reserve boards and release them when tests complete.
+   - Multi-node cluster acquisition (`with lab.acquire_cluster({"master": ..., "dut": ...}) as cluster:`).
+   - Zero mandatory third-party dependencies for core functionality (works out-of-the-box with Python's standard library, with optional extras for `PyYAML`, `pyserial`, `Flask`, and `pytest`).
+2. **Composable Transports & Power Controllers**:
+   - **Transports**: `SSHTransport` (OpenSSH/Dropbear), `SerialTransport` (UART + U-Boot command templating `{IMAGE}`, `{DTB}`, `{ROOT_FS}`), `ADBTransport` (Android Debug Bridge over USB or Wi-Fi), and `LocalTransport`.
+   - **Power Controllers**: `WebhookPowerController` (Shelly/Tasmota/REST smart plugs), `USBHubPowerController` (`uhubctl` USB port power), `IPMIPowerController` (`ipmitool`), `CommandPowerController`, and `SimulatedPowerController`.
+3. **Network & Local Bus Discovery (`damf.discovery`)**:
+   - `ARPScanner` with built-in MAC OUI vendor detection for Raspberry Pi Foundation, Texas Instruments, BeagleBoard, Espressif, NVIDIA Jetson, Arduino, and Google/Android.
+   - `MDNSScanner` for `.local` hostnames, `SubnetScanner` for SSH/ADB port probing, `SerialScanner` for `/dev/ttyUSB*` & `/dev/ttyACM*`, and `ADBScanner` for `adb devices -l`.
+4. **SQLite-Backed Resource Pool, JUnit Result Parser & Pytest Plugin**:
+   - Persistent inventory, atomic reservation locking with TTL lease expiration, and JUnit XML / JSON test report generation.
+   - Built-in `pytest` fixtures (`damf_lab`, `damf_device`).
+5. **Interactive Web Dashboard & REST API (`damf.web`)**:
+   - **Dashboard**: Real-time KPIs, active reservations, and quick command/test runner.
+   - **Devices Manager**: Add, edit, delete, export YAML/JSON, reserve/release, and toggle board power.
+   - **Dynamic Lab Topology View**: Interactive SVG network/subnet diagram displaying boards and inter-device links (`connected_to`).
+   - **Setup Wizard**: Configure lab name, subnets, and administrator settings.
 
-This software is still "work in progress" and small parts of the current code are forked from a framework I wrote for a specific context & customer. There are a lot of things to be done and I would be more than glad if other people in the industry would jump in with ideas and code work.
+---
 
-The ResourcePool component is momentarily a stub, since this module has to be written and adapted to a more general use (the original version uses some dedicated tools that were available in the customers environment), maybe using pdu-client.
-All other developments are totally independent of previous implementations.
+## Quick Start
 
-A web server component will be added shortly.
+### 1. Python API Usage in Test Scripts
+```python
+from damf import Lab
 
-## Goals ##
-In the end, this framework will provide:
-- a test job scheduling mechanism (using queues)
-- a daemon service that receives requests
-- a concise web interface for browsing test results, test run statuses & the such (somewhere down the line...)
-- user-based access (with access rights management, customizations, etc.)
+# Initialize lab (from SQLite DB, config file, or live network discovery)
+lab = Lab(db_path="~/.damf/damf.db", seed_demo=True)
 
+# Reserve a Raspberry Pi 4, power it on, run commands, and auto-release on exit
+with lab.acquire(board_type="raspberry-pi-4", tags=["gpio"], owner="ci-runner") as rpi:
+    rpi.power_on()
+    res = rpi.run("uname -a", check=True)
+    print(res.stdout)
 
-Complete design & implementation diagrams and mindmaps, along with module documentation, can and will be found in the "docs" folder.
+    suite = lab.run_test_suite(
+        rpi,
+        commands={
+            "check_kernel": "uname -r",
+            "check_i2c_dev": "ls /dev",
+        },
+        suite_name="rpi_sanity",
+        output_dir="./reports",
+    )
+    assert suite.failed == 0
+```
+
+### 2. CLI Usage
+```bash
+# List devices (seeding demo Raspberry Pi, TI AM62x, BeagleBone, and Android devices)
+python3 -m damf.cli --seed-demo devices
+
+# Discover devices over ARP, mDNS, USB Serial, and ADB
+python3 -m damf.cli discover --mdns
+
+# Reserve, execute a command, and release a board
+python3 -m damf.cli reserve --name rpi4-lab-01 --owner tester
+python3 -m damf.cli exec rpi4-lab-01 "uname -a"
+python3 -m damf.cli release rpi4-lab-01
+
+# Launch the interactive Web UI & REST API server on http://127.0.0.1:8080
+python3 -m damf.cli serve --port 8080
+# (or via python3 damf-ui.py)
+```
+
+### 3. Running the Test Suite
+```bash
+python3 -m unittest discover -s tests -v
+```

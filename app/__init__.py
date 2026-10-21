@@ -1,12 +1,20 @@
-from flask import Flask
 from config import Config
-from flask_sqlalchemy import SQLAlchemy
-from flash_migrate import Migrate
+from damf.web import DAMFWebApp
 
-app = Flask(__name__)
-app.config.from_object(Config)
+try:
+    from flask import Flask
+    from flask_sqlalchemy import SQLAlchemy
+    from flask_migrate import Migrate
 
-db = SQLAlchemy(app)
-migrate = Migrate(app, db)
+    app = Flask(__name__)
+    app.config.from_object(Config)
 
-from app import routes, models
+    db = SQLAlchemy(app)
+    migrate = Migrate(app, db)
+
+    from app import routes, models  # noqa: E402,F401
+except ImportError:
+    # Fallback when Flask is not installed: expose the standalone DAMFWebApp instance
+    app = DAMFWebApp()
+    db = None
+    migrate = None

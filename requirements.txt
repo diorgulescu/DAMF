@@ -1,1 +1,10 @@
-flask
+# Optional dependencies (DAMF v2.0 core runs on standard library Python >= 3.9)
+PyYAML>=6.0
+pyserial>=3.5
+pexpect>=4.8
+zeroconf>=0.131.0
+Flask>=3.0
+Flask-SQLAlchemy>=3.1
+Flask-Migrate>=4.0
+Flask-WTF>=1.2
+pytest>=8.0

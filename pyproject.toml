@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "damf"
+version = "2.0.0"
+description = "Device Automation and Management Framework for embedded labs (Raspberry Pi, TI boards, Linux SBCs, Android)"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+authors = [
+    { name = "Dragos Iorgulescu" }
+]
+keywords = ["embedded", "lab", "automation", "testing", "raspberry-pi", "texas-instruments", "adb", "hardware-in-the-loop"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Testing",
+    "Topic :: System :: Hardware",
+    "Programming Language :: Python :: 3",
+]
+dependencies = []
+
+[project.optional-dependencies]
+yaml = ["PyYAML>=6.0"]
+serial = ["pyserial>=3.5", "pexpect>=4.8"]
+discovery = ["zeroconf>=0.131.0"]
+web = ["Flask>=3.0", "Flask-SQLAlchemy>=3.1", "Flask-Migrate>=4.0", "Flask-WTF>=1.2"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+damf = "damf.cli:main"
+
+[project.entry-points.pytest11]
+damf = "damf.pytest_plugin"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["damf*"]

@@ -1,61 +1,45 @@
-from flask import render_template, flash, redirect, url_for
+"""Flask routes bridged to the DAMF core engine (`DAMFWebApp`)."""
+
+from flask import Response, flash, redirect, render_template, request, url_for
 from app import app
 from app.forms import LoginForm
+from damf.web import DAMFWebApp
+
+_damf_web = DAMFWebApp()
+
+
+def _bridge_to_damf():
+    status, content_type, body = _damf_web.handle_request(
+        request.method,
+        request.full_path if request.query_string else request.path,
+        request.get_data(),
+    )
+    return Response(body, status=status, content_type=content_type)
+
 
 @app.route('/')
 @app.route('/index.html')
 @app.route('/index')
-def index():
-    return render_template("index.html")
-
 @app.route('/devices')
-def devices():
-    device_list = [
-            {
-                'owner' : {'username' : 'admin'},
-                'name' : 'raspberry-pi-v3-1',
-                'state' : 'running',
-                'deployed_image' : 'Focused Linux',
-                'arch' : 'arm'
-                },
-            {
-                'owner' : {'username' : 'admin'},
-                'name' : 'raspberry-pi-v2-server',
-                'state' : 'powered off',
-                'deployed_image' : 'Raspbian',
-                'arch' : 'arm'
-                }
-            ]
-    return render_template("devices.html", devices=device_list)
-
 @app.route('/lab')
-def lab_view():
-    return "Lab diagram view (dynamically generated)"
-
 @app.route('/dashboard')
-def user_dashboard():
-    return "A user landing page, displaying relevant info for each and every account"
+@app.route('/administration')
+@app.route('/user')
+@app.route('/setup')
+@app.route('/reports')
+def ui_routes():
+    return _bridge_to_damf()
+
+
+@app.route('/api/v1/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE'])
+def api_v1_routes(subpath):
+    return _bridge_to_damf()
+
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     form = LoginForm()
     if form.validate_on_submit():
-        flash("Login requested for user {}, remember_me={}".format(form.username.data,form.remember_me.data))
-        return redirect(url_for('index'))
-    return render_template("login.html", title="Sign In", form=form) 
-
-@app.route('/administration')
-def admin_section():
-    return "Admin section"
-
-@app.route('/user')
-def user_section():
-    return "User account section"
-
-@app.route('/setup')
-def first_run():
-    return "First run - quick setup wizard"
-
-@app.route('/reports')
-def reporting():
-    return "Reporting center"
+        flash("Login requested for user {}, remember_me={}".format(form.username.data, form.remember_me.data))
+        return redirect(url_for('ui_routes'))
+    return render_template("login.html", title="Sign In", form=form)
