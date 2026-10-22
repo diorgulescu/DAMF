@@ -48,9 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("--port", dest="ssh_port", type=int, default=22, help="SSH port (default: 22)")
     p_add.add_argument("--key", dest="identity_file", help="Path to SSH private key")
     p_add.add_argument("--os", dest="os_hint", help="Target OS hint (e.g. debian, busybox, poky, freebsd)")
+    p_add.add_argument("--transport", default="ssh", help="Primary transport (ssh, serial, adb, local)")
+    p_add.add_argument("--serial-port", help="Serial UART port if supported (e.g. /dev/ttyUSB0, /dev/ttyACM0)")
+    p_add.add_argument("--baudrate", type=int, default=115200, help="Serial baudrate (default: 115200)")
     p_add.add_argument("--connect-to", default="", help="Comma-separated peer device names in topology")
     p_add.add_argument("--tags", default="", help="Comma-separated capability tags")
-    p_add.add_argument("--simulated", action="store_true", help="Enable simulated SSH mode for testing")
+    p_add.add_argument("--simulated", action="store_true", help="Enable simulated SSH/Serial mode for testing")
 
     # damf link
     p_link = sub.add_parser("link", help="Connect two devices in the lab topology")
@@ -62,6 +65,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_ssh.add_argument("name", help="Target device name")
     p_ssh.add_argument("-c", "--command", help="Optional single command to execute over SSH")
     p_ssh.add_argument("-i", "--interactive", action="store_true", help="Launch interactive system ssh session")
+
+    # damf serial
+    p_ser = sub.add_parser("serial", help="Connect via Serial (UART) to a target that supports it")
+    p_ser.add_argument("name", help="Target device name")
+    p_ser.add_argument("-c", "--command", help="Optional command to execute over the serial console")
+    p_ser.add_argument("-i", "--interactive", action="store_true", help="Launch interactive serial terminal (picocom/tio/minicom/screen)")
+    p_ser.add_argument("--no-login", action="store_true", help="Do not auto-login if console is at a login: prompt")
 
     # damf reboot
     p_reb = sub.add_parser("reboot", help="Reboot a target over SSH using OS-appropriate Linux/Unix reboot command")
@@ -181,6 +191,7 @@ def _dispatch_cli(parser: argparse.ArgumentParser, args: argparse.Namespace, lab
             ip_address=args.ip_address,
             subnet=args.subnet,
             arch=args.arch,
+            transport=args.transport,
             ssh_user=args.ssh_user,
             ssh_port=args.ssh_port,
             identity_file=args.identity_file,
@@ -188,6 +199,8 @@ def _dispatch_cli(parser: argparse.ArgumentParser, args: argparse.Namespace, lab
             connected_to=peers,
             tags=tags,
             simulated=args.simulated,
+            serial_port=args.serial_port,
+            baudrate=args.baudrate,
         )
         print(
             f"Defined device '{spec.name}' ({spec.board_type}, ip={spec.ip_address or 'N/A'}, "
@@ -222,6 +235,34 @@ def _dispatch_cli(parser: argparse.ArgumentParser, args: argparse.Namespace, lab
         print(f"  Detected OS      : {os_info.get('pretty_name')} [kernel={os_info.get('kernel')}, init={os_info.get('init_system')}]")
         print(f"  OS Reboot Command: {os_info.get('reboot_command')}")
         print(f"  Interactive Shell: {info['interactive_cmd']}")
+        return 0
+
+    if args.subcommand == "serial":
+        dev = lab.get_device(args.name)
+        if args.interactive:
+            import subprocess
+            from damf.transports import SerialTransport
+
+            ser_t = dev.transport if isinstance(dev.transport, SerialTransport) else SerialTransport(dev.spec)
+            cmd_list = ser_t.build_interactive_serial_command()
+            return subprocess.call(cmd_list)
+        if args.command:
+            res = lab.run_serial(args.name, args.command)
+            if res["stdout"]:
+                sys.stdout.write(res["stdout"])
+            if res["stderr"]:
+                sys.stderr.write(res["stderr"])
+            return res["returncode"]
+        info = lab.connect_serial(args.name, auto_login=not args.no_login)
+        os_info = info.get("os_info", {})
+        print(
+            f"Connected via Serial to {info['device']} on {info['serial_port']} "
+            f"@ {info['baudrate']} ({info['databits']}{info['parity']}{info['stopbits']})"
+        )
+        print(f"  Console State    : {info['console_state']}")
+        if os_info.get("pretty_name"):
+            print(f"  Detected OS      : {os_info.get('pretty_name')} [kernel={os_info.get('kernel')}, init={os_info.get('init_system')}]")
+        print(f"  Interactive Term : {info['interactive_cmd']}")
         return 0
 
     if args.subcommand == "reboot":

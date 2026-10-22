@@ -27,9 +27,11 @@ from damf import (
     ResourcePool,
     ResultParser,
     SerialScanner,
+    TransportError,
     collect_telemetry,
     create_http_server,
     determine_reboot_command,
+    device_supports_serial,
     dump_yaml,
     generate_posix_shell_agent,
     lookup_mac_vendor,
@@ -672,6 +674,72 @@ class TestTargetHeartbeatAgentAndTelemetry(unittest.TestCase):
                     ),
                     0,
                 )
+        finally:
+            lab.close()
+
+    def test_serial_connection_console_state_and_dual_transport(self) -> None:
+        lab = Lab(db_path=":memory:", seed_demo=True)
+        web_app = DAMFWebApp(lab=lab)
+        client = RemoteLabClient(app=web_app)
+        try:
+            # 1. Pure serial target (ti-am62x-evm-01 on /dev/ttyUSB0)
+            ser_dev = lab.get_device("ti-am62x-evm-01")
+            self.assertTrue(ser_dev.supports_serial)
+            self.assertTrue(device_supports_serial(ser_dev.spec))
+
+            ser_info = lab.connect_serial("ti-am62x-evm-01")
+            self.assertTrue(ser_info["connected"])
+            self.assertEqual(ser_info["serial_port"], "/dev/ttyUSB0")
+            self.assertEqual(ser_info["baudrate"], 115200)
+            self.assertEqual(ser_info["console_state"], "shell")
+            self.assertIn("os_info", ser_info)
+
+            # 2. Dual-transport target (primary SSH + secondary UART /dev/ttyUSB1 on rpi4-lab-01)
+            rpi_dev = lab.get_device("rpi4-lab-01")
+            self.assertEqual(rpi_dev.spec.transport, "ssh")
+            self.assertTrue(rpi_dev.supports_serial)
+
+            rpi_serial_info = client.connect_serial("rpi4-lab-01")
+            self.assertTrue(rpi_serial_info["connected"])
+            self.assertEqual(rpi_serial_info["serial_port"], "/dev/ttyUSB1")
+            self.assertEqual(rpi_serial_info["console_state"], "shell")
+
+            exec_res = client.run_serial("rpi4-lab-01", "uname -a")
+            self.assertEqual(exec_res["returncode"], 0)
+            self.assertEqual(exec_res["serial_port"], "/dev/ttyUSB1")
+            self.assertIn("Linux", exec_res["stdout"])
+
+            # 3. U-Boot console state detection over serial
+            uboot_spec = lab.define_device(
+                name="ti-uboot-serial",
+                board_type="ti-am62x",
+                transport="serial",
+                serial_port="/dev/ttyUSB3",
+                baudrate=115200,
+                simulated=True,
+            )
+            uboot_spec.transport_config["console_state"] = "uboot"
+            lab.register_device(uboot_spec, overwrite=True)
+            uboot_info = lab.connect_serial("ti-uboot-serial")
+            self.assertEqual(uboot_info["console_state"], "uboot")
+            uboot_cmd = lab.run_serial("ti-uboot-serial", "version")
+            self.assertIn("U-Boot", uboot_cmd["stdout"])
+
+            # 4. Target that does NOT support serial raises TransportError (HTTP 400 in REST API)
+            android_dev = lab.get_device("pixel-7-testphone")
+            self.assertFalse(android_dev.supports_serial)
+            with self.assertRaises(TransportError):
+                lab.connect_serial("pixel-7-testphone")
+
+            # 5. CLI `damf serial` connect and command execution
+            self.assertEqual(
+                cli_main(["--db", ":memory:", "--seed-demo", "serial", "ti-am62x-evm-01"]),
+                0,
+            )
+            self.assertEqual(
+                cli_main(["--db", ":memory:", "--seed-demo", "serial", "rpi4-lab-01", "-c", "uname -a"]),
+                0,
+            )
         finally:
             lab.close()
 

@@ -107,10 +107,17 @@ class Lab:
         tags: list[str] | None = None,
         simulated: bool = False,
         power_type: str = "ssh",
+        serial_port: str | None = None,
+        baudrate: int = 115200,
     ) -> DeviceSpec:
-        """Manually define and register a device in the lab topology with SSH/connection settings."""
+        """Manually define and register a device in the lab topology with SSH and/or Serial settings."""
         if not subnet:
-            subnet = ".".join(ip_address.split(".")[:3]) + ".0/24" if ip_address and "." in ip_address else "192.168.10.0/24"
+            if ip_address and "." in ip_address:
+                subnet = ".".join(ip_address.split(".")[:3]) + ".0/24"
+            elif transport == "serial" or serial_port:
+                subnet = "local-serial"
+            else:
+                subnet = "192.168.10.0/24"
         t_cfg: dict[str, Any] = {
             "user": ssh_user,
             "port": int(ssh_port),
@@ -120,6 +127,11 @@ class Lab:
             t_cfg["identity_file"] = identity_file
         if password:
             t_cfg["password"] = password
+        if serial_port:
+            t_cfg["serial_port"] = serial_port
+            t_cfg["baudrate"] = int(baudrate)
+            if transport == "serial":
+                t_cfg["port"] = serial_port
         attrs: dict[str, Any] = {}
         if os_hint:
             attrs["os"] = os_hint
@@ -178,6 +190,29 @@ class Lab:
         info = dev.connect_ssh(verify_auth=verify_auth)
         self.pool.register_device(dev.spec, overwrite=True)
         return info
+
+    def connect_serial(self, name: str, auto_login: bool = True) -> dict[str, Any]:
+        """Connect to `name` over serial (UART), detect console state (shell/login/uboot) and OS, and persist metadata."""
+        dev = self.get_device(name)
+        info = dev.connect_serial(auto_login=auto_login)
+        self.pool.register_device(dev.spec, overwrite=True)
+        return info
+
+    def run_serial(self, name: str, command: str, timeout: float = 30.0) -> dict[str, Any]:
+        """Run a command over the serial UART console of `name` even if its primary transport is SSH."""
+        dev = self.get_device(name)
+        res = dev.run_serial(command, timeout=timeout)
+        self.pool.register_device(dev.spec, overwrite=True)
+        return {
+            "device": dev.name,
+            "serial_port": dev.spec.transport_config.get("serial_port") or dev.spec.transport_config.get("port"),
+            "baudrate": dev.spec.transport_config.get("baudrate", 115200),
+            "command": res.command,
+            "returncode": res.returncode,
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+            "duration_sec": res.duration_sec,
+        }
 
     def reboot_device(self, name: str, via_ssh: bool = True, force_os_probe: bool = False) -> dict[str, Any]:
         """Reboot `name` (by default over SSH using OS-appropriate Linux/Unix reboot command)."""
@@ -547,6 +582,22 @@ class RemoteLabClient:
             "POST",
             f"/api/v1/devices/{urllib.parse.quote(name)}/connect",
             {"verify_auth": verify_auth},
+        )
+
+    def connect_serial(self, name: str, auto_login: bool = True) -> dict[str, Any]:
+        """Connect via Serial (UART) to the specified target, detect console state (shell/uboot), and probe OS."""
+        return self._request(
+            "POST",
+            f"/api/v1/devices/{urllib.parse.quote(name)}/serial-connect",
+            {"auto_login": auto_login},
+        )
+
+    def run_serial(self, name: str, command: str, timeout: float = 30.0) -> dict[str, Any]:
+        """Execute a command over the serial UART console of the specified target via REST API."""
+        return self._request(
+            "POST",
+            f"/api/v1/devices/{urllib.parse.quote(name)}/serial-exec",
+            {"command": command, "timeout": timeout},
         )
 
     def reboot(self, name: str, via_ssh: bool = True) -> dict[str, Any]:

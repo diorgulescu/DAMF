@@ -16,6 +16,7 @@ from damf.transports import (
     Transport,
     create_transport,
     determine_reboot_command,
+    device_supports_serial,
     parse_os_probe_output,
 )
 
@@ -64,6 +65,11 @@ class Device:
     def power_state(self) -> str:
         return self.spec.power_state
 
+    @property
+    def supports_serial(self) -> bool:
+        """Return True if this device is configured for or supports UART/Serial console access."""
+        return device_supports_serial(self.spec)
+
     # Lifecycle & Context Manager
     def connect(self) -> "Device":
         """Connect to the target over its configured transport."""
@@ -86,6 +92,26 @@ class Device:
             "os_info": os_info,
             "interactive_cmd": " ".join(ssh.build_interactive_ssh_command()),
         }
+
+    def connect_serial(self, auto_login: bool = True) -> dict[str, Any]:
+        """Connect to the target over UART/Serial console and return port/prompt state."""
+        if not self.supports_serial:
+            raise TransportError(f"Device '{self.name}' does not support serial connections")
+        ser = self.transport if isinstance(self.transport, SerialTransport) else SerialTransport(self.spec)
+        ser.connect()
+        if isinstance(self.transport, SerialTransport):
+            self.transport.connected = True
+        info = ser.detect_console_state(auto_login=auto_login)
+        if info.get("console_state") == "shell":
+            info["os_info"] = self.detect_os()
+        return info
+
+    def run_serial(self, command: str, timeout: float = 30.0) -> CommandResult:
+        """Execute a command specifically over the UART/Serial console."""
+        if not self.supports_serial:
+            raise TransportError(f"Device '{self.name}' does not support serial connections")
+        ser = self.transport if isinstance(self.transport, SerialTransport) else SerialTransport(self.spec)
+        return ser.run(command, timeout=timeout)
 
     def detect_os(self, force_refresh: bool = False) -> dict[str, str]:
         """Detect the OS, distribution, and init system running on the target."""

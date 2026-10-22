@@ -26,7 +26,10 @@ class DAMFWebApp:
 
     def _register_from_payload(self, payload: dict[str, Any]) -> DeviceSpec:
         """Normalize a REST device creation/update payload and register it in the lab topology."""
-        if any(k in payload for k in ("ssh_user", "ssh_port", "identity_file", "password", "os_hint")):
+        if any(
+            k in payload
+            for k in ("ssh_user", "ssh_port", "identity_file", "password", "os_hint", "serial_port", "baudrate")
+        ):
             return self.lab.define_device(
                 name=str(payload["name"]),
                 board_type=str(payload.get("board_type", "generic-linux")),
@@ -43,6 +46,8 @@ class DAMFWebApp:
                 tags=payload.get("tags") or [],
                 simulated=bool(payload.get("simulated", False)),
                 power_type=str(payload.get("power_type", "ssh")),
+                serial_port=payload.get("serial_port") or None,
+                baudrate=int(payload.get("baudrate") or 115200),
             )
         return self.lab.register_device(payload, overwrite=True)
 
@@ -257,6 +262,17 @@ class DAMFWebApp:
                 elif action == "connect" and method == "POST":
                     verify_auth = bool(payload.get("verify_auth", False))
                     info = self.lab.connect_ssh(dev_name, verify_auth=verify_auth)
+                    return json_resp(info)
+
+                elif action == "serial-connect" and method == "POST":
+                    auto_login = bool(payload.get("auto_login", True))
+                    info = self.lab.connect_serial(dev_name, auto_login=auto_login)
+                    return json_resp(info)
+
+                elif action == "serial-exec" and method == "POST":
+                    cmd = str(payload.get("command", "uname -a"))
+                    timeout = float(payload.get("timeout", 30.0))
+                    info = self.lab.run_serial(dev_name, command=cmd, timeout=timeout)
                     return json_resp(info)
 
                 elif action == "deploy-agent" and method == "POST":

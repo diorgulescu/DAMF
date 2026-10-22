@@ -7,7 +7,7 @@ from damf.models import DeviceSpec, TransportType
 from damf.transports.adb import ADBTransport
 from damf.transports.base import Transport
 from damf.transports.local import LocalTransport
-from damf.transports.serial_transport import SerialTransport
+from damf.transports.serial_transport import SerialTransport, device_supports_serial
 from damf.transports.ssh import (
     SSHTransport,
     determine_reboot_command,
@@ -36,6 +36,7 @@ __all__ = [
     "ADBTransport",
     "LocalTransport",
     "create_transport",
+    "device_supports_serial",
     "parse_os_probe_output",
     "determine_reboot_command",
 ]

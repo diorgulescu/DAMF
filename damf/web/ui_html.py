@@ -284,19 +284,23 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </table>
         </div>
         <div class="card">
-          <h3 style="margin-top:0">SSH, Agent Telemetry &amp; Target Console</h3>
+          <h3 style="margin-top:0">SSH, Serial (UART), Agent Telemetry &amp; Target Console</h3>
           <label>Target Device</label>
           <select id="quick-device"></select>
           <div style="display:flex; gap:0.45rem; flex-wrap:wrap; margin-bottom:0.65rem;">
             <button class="btn" onclick="connectSelectedSSH()">Connect SSH &amp; Detect OS</button>
+            <button class="btn" onclick="connectSelectedSerial()">Connect Serial (UART)</button>
             <button class="btn btn-secondary" onclick="deploySelectedAgent()">Deploy Agent (SSH)</button>
             <button class="btn btn-secondary" onclick="viewSelectedTelemetry()">Vital Telemetry</button>
             <button class="btn btn-secondary" onclick="copySelectedSystemLogs()">Copy System Logs</button>
             <button class="btn btn-warning" onclick="rebootSelectedSSH()">Reboot Target (SSH)</button>
           </div>
-          <label>Shell / SSH / ADB Command</label>
+          <label>Shell / SSH / Serial (UART) / ADB Command</label>
           <input id="quick-cmd" value="uname -a && cat /etc/os-release" />
-          <button class="btn" style="margin-bottom:0.75rem;" onclick="runQuickCommand()">Execute Command</button>
+          <div style="display:flex; gap:0.45rem; flex-wrap:wrap; margin-bottom:0.75rem;">
+            <button class="btn" onclick="runQuickCommand()">Execute Command</button>
+            <button class="btn btn-secondary" onclick="runQuickSerialCommand()">Execute over Serial (UART)</button>
+          </div>
           <label>Console Output</label>
           <pre class="console" id="quick-output">Ready.</pre>
           <hr style="border:0; border-top:1px solid var(--border); margin:1rem 0;" />
@@ -423,6 +427,16 @@ echo "DAMF toolkit initialized on $(hostname)"</textarea>
             <div>
               <label>Target OS Hint</label>
               <input id="dev-os-hint" placeholder="debian, busybox, yocto, freebsd..." />
+            </div>
+          </div>
+          <div class="form-row">
+            <div>
+              <label>Serial Port (UART, optional)</label>
+              <input id="dev-serial-port" placeholder="/dev/ttyUSB0 or /dev/ttyACM0" />
+            </div>
+            <div>
+              <label>Serial Baudrate</label>
+              <input id="dev-baudrate" type="number" value="115200" />
             </div>
           </div>
           <label>Tags (comma-separated)</label>
@@ -623,15 +637,21 @@ echo "DAMF toolkit initialized on $(hostname)"</textarea>
         const osInfo = (d.attributes && d.attributes.os_info && d.attributes.os_info.pretty_name) || d.deployed_image || '—';
         const user = (d.transport_config && d.transport_config.user) || 'root';
         const port = (d.transport_config && d.transport_config.port) || 22;
+        const serialPort = (d.transport_config && d.transport_config.serial_port) || (d.transport === 'serial' ? port : '');
+        const serialBadge = serialPort ? `<br/><small style="color:var(--accent)">UART: ${serialPort} @ ${(d.transport_config && d.transport_config.baudrate) || 115200}</small>` : '';
+        const serialBtn = serialPort || d.transport === 'serial'
+          ? `<button class="btn btn-secondary" onclick="connectDeviceSerial('${d.name}')">Serial Connect</button>`
+          : '';
         devBody.innerHTML += `<tr>
           <td><strong>${d.name}</strong><br/>${tagsHtml}</td>
           <td>${d.board_type} (${d.arch})<br/><small style="color:var(--muted)">${osInfo}</small></td>
-          <td><code>${user}@${d.ip_address || 'local'}:${port}</code><br/><small style="color:var(--muted)">${d.subnet}</small></td>
+          <td><code>${user}@${d.ip_address || 'local'}:${port}</code><br/><small style="color:var(--muted)">${d.subnet}</small>${serialBadge}</td>
           <td><span class="tag">${d.power_state}</span></td>
           <td><span class="pill ${pillClass}">${d.state}</span></td>
           <td style="display:flex; gap:0.35rem; flex-wrap:wrap;">
             ${resBtn}
             <button class="btn btn-secondary" onclick="connectDeviceSSH('${d.name}')">SSH Connect</button>
+            ${serialBtn}
             <button class="btn btn-secondary" onclick="copyDeviceSystemLogs('${d.name}')">Copy System Logs</button>
             <button class="btn btn-warning" onclick="rebootDeviceSSH('${d.name}')">Reboot (SSH)</button>
             <button class="btn btn-secondary" onclick="powerDevice('${d.name}', '${pwrAction}')">Power ${pwrAction.toUpperCase()}</button>
@@ -720,6 +740,8 @@ echo "DAMF toolkit initialized on $(hostname)"</textarea>
       if (!d) return;
       const user = (d.transport_config && d.transport_config.user) || 'root';
       const port = (d.transport_config && d.transport_config.port) || 22;
+      const serialPort = (d.transport_config && d.transport_config.serial_port) || (d.transport === 'serial' ? port : null);
+      const baudrate = (d.transport_config && d.transport_config.baudrate) || 115200;
       const osInfo = (d.attributes && d.attributes.os_info) || {};
       const tel = (d.attributes && d.attributes.telemetry) || {};
       const lastReboot = (d.attributes && d.attributes.last_reboot_command) || osInfo.reboot_command || 'Auto-detect on reboot';
@@ -728,6 +750,7 @@ echo "DAMF toolkit initialized on $(hostname)"</textarea>
         <h4 style="margin-top:0; color:var(--text)">${d.name}</h4>
         <p><strong>Board Type / Arch:</strong> ${d.board_type} (${d.arch})</p>
         <p><strong>SSH Endpoint:</strong> <code>ssh -p ${port} ${user}@${d.ip_address || 'local'}</code></p>
+        <p><strong>Serial (UART):</strong> <code>${serialPort ? `${serialPort} @ ${baudrate} 8N1` : 'Not configured'}</code></p>
         <p><strong>Subnet:</strong> ${d.subnet}</p>
         <p><strong>State / Power:</strong> ${d.state} / ${d.power_state}</p>
         <p><strong>Vital Telemetry:</strong> Load <code>${tel.load_1m ?? '—'} / ${tel.load_5m ?? '—'} / ${tel.load_15m ?? '—'}</code> • RAM <code>${tel.mem_percent ?? '—'}%</code> • Temp <code>${tel.cpu_temp_c ?? '—'}°C</code></p>
@@ -736,6 +759,7 @@ echo "DAMF toolkit initialized on $(hostname)"</textarea>
         <p><strong>Connected Peers:</strong> ${(d.connected_to || []).join(', ') || 'None'}</p>
         <div style="display:flex; gap:0.4rem; flex-wrap:wrap; margin-top:0.65rem;">
           <button class="btn" onclick="connectDeviceSSH('${d.name}')">Connect SSH &amp; Probe OS</button>
+          ${serialPort ? `<button class="btn" onclick="connectDeviceSerial('${d.name}')">Connect Serial (UART)</button>` : ''}
           <button class="btn btn-secondary" onclick="viewDeviceTelemetry('${d.name}')">Vital Load</button>
           <button class="btn btn-secondary" onclick="copyDeviceSystemLogs('${d.name}')">Copy System Logs</button>
           <a class="btn btn-secondary" href="/api/v1/devices/${encodeURIComponent(d.name)}/logs?format=download" target="_blank" style="text-decoration:none;">Download .log</a>
@@ -771,6 +795,38 @@ echo "DAMF toolkit initialized on $(hostname)"</textarea>
     async function connectSelectedSSH() {
       const dev = document.getElementById('quick-device').value;
       if (dev) await connectDeviceSSH(dev);
+    }
+
+    async function connectDeviceSerial(name) {
+      const res = await api(`/api/v1/devices/${encodeURIComponent(name)}/serial-connect`, 'POST', { auto_login: true });
+      if (res.error) {
+        document.getElementById('quick-output').textContent = `[Serial Error] ${res.error}`;
+        return;
+      }
+      const os = res.os_info || {};
+      document.getElementById('quick-output').textContent =
+        `[Serial Connected to ${res.device} on ${res.serial_port} @ ${res.baudrate} (${res.databits}${res.parity}${res.stopbits})]\\n` +
+        `Console State  : ${res.console_state}\\n` +
+        `Interactive CLI: ${res.interactive_cmd}\\n` +
+        (os.pretty_name ? `Detected OS    : ${os.pretty_name} (kernel=${os.kernel}, init=${os.init_system})` : `Bootloader     : U-Boot prompt active`);
+      await refreshAll();
+    }
+
+    async function connectSelectedSerial() {
+      const dev = document.getElementById('quick-device').value;
+      if (dev) await connectDeviceSerial(dev);
+    }
+
+    async function runQuickSerialCommand() {
+      const dev = document.getElementById('quick-device').value;
+      const cmd = document.getElementById('quick-cmd').value;
+      const res = await api(`/api/v1/devices/${encodeURIComponent(dev)}/serial-exec`, 'POST', { command: cmd });
+      if (res.error) {
+        document.getElementById('quick-output').textContent = `[Serial Error] ${res.error}`;
+        return;
+      }
+      document.getElementById('quick-output').textContent =
+        `[UART ${res.serial_port} @ ${res.baudrate}] $ ${res.command}\\n[exit ${res.returncode} in ${res.duration_sec}s]\\n${res.stdout}${res.stderr || ''}`;
     }
 
     async function rebootSelectedSSH() {
@@ -904,6 +960,8 @@ echo "DAMF toolkit initialized on $(hostname)"</textarea>
       document.getElementById('dev-ssh-port').value = (d.transport_config && d.transport_config.port) || 22;
       document.getElementById('dev-ssh-key').value = (d.transport_config && d.transport_config.identity_file) || '';
       document.getElementById('dev-os-hint').value = (d.attributes && d.attributes.os) || '';
+      document.getElementById('dev-serial-port').value = (d.transport_config && d.transport_config.serial_port) || (d.transport === 'serial' ? (d.transport_config && d.transport_config.port) || '' : '');
+      document.getElementById('dev-baudrate').value = (d.transport_config && d.transport_config.baudrate) || 115200;
       document.getElementById('dev-simulated').checked = Boolean(d.transport_config && d.transport_config.simulated);
       document.getElementById('dev-tags').value = (d.tags || []).join(', ');
       document.getElementById('dev-peers').value = (d.connected_to || []).join(', ');
@@ -921,6 +979,8 @@ echo "DAMF toolkit initialized on $(hostname)"</textarea>
         ssh_port: parseInt(document.getElementById('dev-ssh-port').value || '22', 10),
         identity_file: document.getElementById('dev-ssh-key').value.trim(),
         os_hint: document.getElementById('dev-os-hint').value.trim(),
+        serial_port: document.getElementById('dev-serial-port').value.trim(),
+        baudrate: parseInt(document.getElementById('dev-baudrate').value || '115200', 10),
         simulated: document.getElementById('dev-simulated').checked,
         tags: document.getElementById('dev-tags').value.split(',').map(s => s.trim()).filter(Boolean),
         connected_to: document.getElementById('dev-peers').value.split(',').map(s => s.trim()).filter(Boolean),

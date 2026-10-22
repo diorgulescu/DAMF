@@ -59,6 +59,7 @@ from damf.transports import (
     Transport,
     create_transport,
     determine_reboot_command,
+    device_supports_serial,
     parse_os_probe_output,
 )
 from damf.web import DAMFWebApp, create_http_server
@@ -97,6 +98,7 @@ __all__ = [
     "ADBTransport",
     "LocalTransport",
     "create_transport",
+    "device_supports_serial",
     "parse_os_probe_output",
     "determine_reboot_command",
     "PowerController",
