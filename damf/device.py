@@ -478,6 +478,127 @@ class Device:
         self.spec.attributes["last_collected_logs"] = result
         return result
 
+    def deploy_content(
+        self,
+        remote_path: str,
+        local_path: str | Path | None = None,
+        content: str | None = None,
+        filename: str | None = None,
+        structure: dict[str, str] | None = None,
+        extract_archive: bool = True,
+        chmod: str | None = None,
+        post_deploy_cmd: str | None = None,
+    ) -> dict[str, Any]:
+        """Deploy a file, directory tree, archive (.tar.gz/.tgz/.tar/.zip), inline text content,
+        or declarative folder `structure` dictionary onto this target device.
+        """
+        import shlex
+        import tempfile
+        from damf.exceptions import ConfigurationError
+
+        self.connect()
+        now = time.time()
+        deployed_items: list[str] = []
+        mode_used = ""
+
+        # 1. Declarative folder structure dictionary: {"bin/run.sh": "#!/bin/sh\n...", "etc/app.conf": "..."}
+        if structure:
+            mode_used = "structure"
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir) / "payload"
+                root.mkdir(parents=True, exist_ok=True)
+                for rel_file, file_body in structure.items():
+                    clean_rel = rel_file.lstrip("/")
+                    target_f = root / clean_rel
+                    target_f.parent.mkdir(parents=True, exist_ok=True)
+                    target_f.write_text(str(file_body), encoding="utf-8")
+                    deployed_items.append(f"{remote_path.rstrip('/')}/{clean_rel}")
+                self.run(f"mkdir -p {shlex.quote(remote_path)}", timeout=10.0)
+                self.upload(root, remote_path)
+
+        # 2. Inline text / script content
+        elif content is not None:
+            mode_used = "inline_content"
+            target_remote = f"{remote_path.rstrip('/')}/{filename}" if filename else remote_path
+            parent_remote = str(Path(target_remote).parent)
+            with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as tmp:
+                tmp.write(content)
+                tmp_path = Path(tmp.name)
+            try:
+                if parent_remote and parent_remote != ".":
+                    self.run(f"mkdir -p {shlex.quote(parent_remote)}", timeout=10.0)
+                self.upload(tmp_path, target_remote)
+                deployed_items.append(target_remote)
+            finally:
+                tmp_path.unlink(missing_ok=True)
+
+        # 3. Local file, directory, or archive (.tar.gz, .tgz, .tar, .zip)
+        elif local_path is not None:
+            src = Path(local_path)
+            if not src.exists():
+                raise ConfigurationError(f"Deployment source path does not exist: {src}")
+
+            low_name = src.name.lower()
+            is_archive = src.is_file() and (
+                low_name.endswith((".tar.gz", ".tgz", ".tar", ".zip"))
+            )
+            if is_archive and extract_archive:
+                mode_used = "archive_extract"
+                remote_tmp_archive = f"/tmp/damf_deploy_{src.name}"
+                self.run(f"mkdir -p {shlex.quote(remote_path)}", timeout=10.0)
+                self.upload(src, remote_tmp_archive)
+                if low_name.endswith((".tar.gz", ".tgz")):
+                    ext_cmd = f"tar -xzf {shlex.quote(remote_tmp_archive)} -C {shlex.quote(remote_path)} && rm -f {shlex.quote(remote_tmp_archive)}"
+                elif low_name.endswith(".tar"):
+                    ext_cmd = f"tar -xf {shlex.quote(remote_tmp_archive)} -C {shlex.quote(remote_path)} && rm -f {shlex.quote(remote_tmp_archive)}"
+                else:
+                    ext_cmd = f"unzip -o {shlex.quote(remote_tmp_archive)} -d {shlex.quote(remote_path)} && rm -f {shlex.quote(remote_tmp_archive)}"
+                self.run(ext_cmd, timeout=30.0)
+                deployed_items.append(f"{remote_path} (extracted from {src.name})")
+            elif src.is_dir():
+                mode_used = "directory"
+                self.run(f"mkdir -p {shlex.quote(remote_path)}", timeout=10.0)
+                self.upload(src, remote_path)
+                deployed_items.append(remote_path)
+            else:
+                mode_used = "file"
+                target_remote = (
+                    f"{remote_path.rstrip('/')}/{filename or src.name}"
+                    if remote_path.endswith("/") or filename
+                    else remote_path
+                )
+                parent_remote = str(Path(target_remote).parent)
+                if parent_remote and parent_remote != ".":
+                    self.run(f"mkdir -p {shlex.quote(parent_remote)}", timeout=10.0)
+                self.upload(src, target_remote)
+                deployed_items.append(target_remote)
+        else:
+            raise ConfigurationError(
+                "deploy_content requires one of: `local_path`, `content`, or `structure`"
+            )
+
+        if chmod:
+            self.run(f"chmod -R {shlex.quote(str(chmod))} {shlex.quote(remote_path)}", timeout=10.0)
+
+        post_output = ""
+        if post_deploy_cmd:
+            res = self.run(post_deploy_cmd, cwd=remote_path if mode_used != "file" else None, timeout=60.0)
+            post_output = res.stdout + (res.stderr or "")
+
+        summary = {
+            "device": self.name,
+            "ok": True,
+            "mode": mode_used,
+            "remote_path": remote_path,
+            "deployed_items": deployed_items,
+            "chmod": chmod or "",
+            "post_deploy_cmd": post_deploy_cmd or "",
+            "post_deploy_output": post_output.strip(),
+            "deployed_at": now,
+        }
+        self.spec.attributes["last_deployment"] = summary
+        return summary
+
     def __repr__(self) -> str:
         return (
             f"<Device name={self.name!r} type={self.board_type!r} "

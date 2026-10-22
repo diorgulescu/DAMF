@@ -141,6 +141,25 @@ class DAMFWebApp:
                 if method in ("POST", "PUT"):
                     return json_resp(self.lab.pool.update_settings(payload))
 
+            # API v1: Fleet / Lab-Wide Content Deployment
+            if method == "POST" and path == "/api/v1/deploy":
+                report = self.lab.deploy_to_lab(
+                    remote_path=str(payload.get("remote_path", "/tmp/damf_deploy")),
+                    local_path=payload.get("local_path") or None,
+                    content=payload.get("content"),
+                    filename=payload.get("filename") or None,
+                    structure=payload.get("structure") if isinstance(payload.get("structure"), dict) else None,
+                    extract_archive=bool(payload.get("extract_archive", True)),
+                    chmod=payload.get("chmod") or None,
+                    post_deploy_cmd=payload.get("post_deploy_cmd") or None,
+                    target_names=payload.get("target_names") or None,
+                    board_type=payload.get("board_type") or None,
+                    arch=payload.get("arch") or None,
+                    tags=payload.get("tags") or None,
+                    include_offline=bool(payload.get("include_offline", False)),
+                )
+                return json_resp(report)
+
             # API v1: Discovery
             if method == "POST" and path == "/api/v1/discover":
                 found = self.lab.scan_and_register(
@@ -249,6 +268,20 @@ class DAMFWebApp:
                         server_url=server_url,
                         interval=interval,
                         prefer_shell=prefer_shell,
+                    )
+                    return json_resp(info)
+
+                elif action == "deploy" and method == "POST":
+                    info = self.lab.deploy_to_device(
+                        name=dev_name,
+                        remote_path=str(payload.get("remote_path", "/tmp/damf_deploy")),
+                        local_path=payload.get("local_path") or None,
+                        content=payload.get("content"),
+                        filename=payload.get("filename") or None,
+                        structure=payload.get("structure") if isinstance(payload.get("structure"), dict) else None,
+                        extract_archive=bool(payload.get("extract_archive", True)),
+                        chmod=payload.get("chmod") or None,
+                        post_deploy_cmd=payload.get("post_deploy_cmd") or None,
                     )
                     return json_resp(info)
 

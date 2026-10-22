@@ -601,6 +601,80 @@ class TestTargetHeartbeatAgentAndTelemetry(unittest.TestCase):
         finally:
             lab.close()
 
+    def test_single_and_lab_wide_fleet_deployment(self) -> None:
+        import tarfile
+
+        lab = Lab(db_path=":memory:", seed_demo=True)
+        web_app = DAMFWebApp(lab=lab)
+        client = RemoteLabClient(app=web_app)
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                # 1. Verify real disk extraction on a LocalTransport target
+                local_target_dir = Path(tmpdir) / "local_board_root"
+                lab.register_device(
+                    DeviceSpec(
+                        name="local-test-node",
+                        board_type="generic-linux",
+                        transport="local",
+                        power_state="on",
+                    )
+                )
+                # Create a .tar.gz archive with a nested folder structure
+                src_tree = Path(tmpdir) / "pkg_src"
+                (src_tree / "bin").mkdir(parents=True)
+                (src_tree / "bin" / "hello.sh").write_text("#!/bin/sh\necho deployed_archive_ok\n", encoding="utf-8")
+                archive_path = Path(tmpdir) / "toolkit.tar.gz"
+                with tarfile.open(archive_path, "w:gz") as tf:
+                    tf.add(src_tree / "bin", arcname="bin")
+
+                dep_archive = lab.deploy_to_device(
+                    name="local-test-node",
+                    remote_path=str(local_target_dir),
+                    local_path=archive_path,
+                    extract_archive=True,
+                    chmod="755",
+                    post_deploy_cmd="sh bin/hello.sh",
+                )
+                self.assertEqual(dep_archive["mode"], "archive_extract")
+                self.assertTrue((local_target_dir / "bin" / "hello.sh").exists())
+                self.assertIn("deployed_archive_ok", dep_archive["post_deploy_output"])
+
+                # 2. Fleet-wide single-procedure deployment of a folder structure to ALL lab targets
+                fleet_report = client.deploy_to_lab(
+                    remote_path=str(Path(tmpdir) / "fleet_dest"),
+                    structure={
+                        "bin/run_hil.sh": "#!/bin/sh\necho hil_ok\n",
+                        "conf/lab.yml": "env: production\n",
+                    },
+                    chmod="755",
+                )
+                self.assertEqual(fleet_report["failed"], 0)
+                self.assertEqual(fleet_report["succeeded"], 6)  # 5 demo boards + local-test-node
+
+                # 3. CLI broadcast deployment to all boards
+                self.assertEqual(
+                    cli_main(
+                        [
+                            "--db",
+                            ":memory:",
+                            "--seed-demo",
+                            "deploy",
+                            "--all",
+                            "--dest",
+                            "/opt/damf_env",
+                            "--content",
+                            "export LAB_READY=1",
+                            "--filename",
+                            "profile.sh",
+                            "--chmod",
+                            "755",
+                        ]
+                    ),
+                    0,
+                )
+        finally:
+            lab.close()
+
 
 if __name__ == "__main__":
     unittest.main()

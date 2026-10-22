@@ -88,6 +88,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_logs.add_argument("-n", "--lines", type=int, default=200, help="Max lines per log source (default: 200)")
     p_logs.add_argument("--files", default="", help="Optional comma-separated remote file paths to copy (e.g. /var/log/syslog)")
 
+    # damf deploy
+    p_deploy = sub.add_parser(
+        "deploy",
+        help="Deploy files, folders, archives (.tar.gz/.zip), or inline content to one or all lab targets",
+    )
+    p_deploy.add_argument("--dest", required=True, help="Destination path on target(s) (e.g. /opt/lab_toolkit)")
+    p_deploy.add_argument("--src", help="Local file, folder, or archive (.tar.gz/.tgz/.tar/.zip) to deploy")
+    p_deploy.add_argument("--content", help="Inline text content to deploy directly")
+    p_deploy.add_argument("--filename", help="Target filename when deploying inline content")
+    p_deploy.add_argument("--all", action="store_true", help="Broadcast deploy to ALL online targets in the lab")
+    p_deploy.add_argument("--targets", default="", help="Comma-separated list of target device names")
+    p_deploy.add_argument("--type", dest="board_type", help="Filter broadcast deployment by board_type")
+    p_deploy.add_argument("--no-extract", action="store_true", help="Do not auto-extract .tar.gz/.zip archives on target")
+    p_deploy.add_argument("--chmod", help="Optional permissions to apply (e.g. 755)")
+    p_deploy.add_argument("--post-cmd", help="Optional command to run on target(s) after deployment")
+
     # damf discover
     p_disc = sub.add_parser("discover", help="Scan network (ARP/mDNS/Subnet), Serial, and ADB for boards")
     p_disc.add_argument("--subnet", help="Optional subnet CIDR to probe (e.g. 192.168.1.0/24)")
@@ -256,6 +272,41 @@ def _dispatch_cli(parser: argparse.ArgumentParser, args: argparse.Namespace, lab
         print(f"Copied system logs from '{res['device']}' -> {res['saved_path']}")
         if res["copied_files"] and len(res["copied_files"]) > 1:
             print(f"  Additional copied files: {', '.join(res['copied_files'][1:])}")
+        return 0
+
+    if args.subcommand == "deploy":
+        target_list = [t.strip() for t in args.targets.split(",") if t.strip()]
+        if args.all or len(target_list) > 1 or args.board_type or not target_list:
+            report = lab.deploy_to_lab(
+                remote_path=args.dest,
+                local_path=args.src,
+                content=args.content,
+                filename=args.filename,
+                extract_archive=not args.no_extract,
+                chmod=args.chmod,
+                post_deploy_cmd=args.post_cmd,
+                target_names=target_list or None,
+                board_type=args.board_type,
+            )
+            print(
+                f"Deployed to {report['succeeded']}/{report['total_targets']} lab target(s) "
+                f"-> {report['remote_path']} ({', '.join(report['targets'])})"
+            )
+            return 0 if report["failed"] == 0 else 1
+
+        single_res = lab.deploy_to_device(
+            name=target_list[0],
+            remote_path=args.dest,
+            local_path=args.src,
+            content=args.content,
+            filename=args.filename,
+            extract_archive=not args.no_extract,
+            chmod=args.chmod,
+            post_deploy_cmd=args.post_cmd,
+        )
+        print(
+            f"Deployed ({single_res['mode']}) to '{single_res['device']}' -> {single_res['remote_path']}"
+        )
         return 0
 
     if args.subcommand == "discover":

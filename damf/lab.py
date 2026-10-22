@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 import json
 from pathlib import Path
@@ -233,6 +234,98 @@ class Lab:
         info = dev.copy_system_logs(output_dir=output_dir, max_lines=max_lines, remote_files=remote_files)
         self.pool.register_device(dev.spec, overwrite=True)
         return info
+
+    def deploy_to_device(
+        self,
+        name: str,
+        remote_path: str,
+        local_path: str | Path | None = None,
+        content: str | None = None,
+        filename: str | None = None,
+        structure: dict[str, str] | None = None,
+        extract_archive: bool = True,
+        chmod: str | None = None,
+        post_deploy_cmd: str | None = None,
+    ) -> dict[str, Any]:
+        """Deploy a file, directory, archive, inline content, or folder structure to a single target `name`."""
+        dev = self.get_device(name)
+        info = dev.deploy_content(
+            remote_path=remote_path,
+            local_path=local_path,
+            content=content,
+            filename=filename,
+            structure=structure,
+            extract_archive=extract_archive,
+            chmod=chmod,
+            post_deploy_cmd=post_deploy_cmd,
+        )
+        self.pool.register_device(dev.spec, overwrite=True)
+        return info
+
+    def deploy_to_lab(
+        self,
+        remote_path: str,
+        local_path: str | Path | None = None,
+        content: str | None = None,
+        filename: str | None = None,
+        structure: dict[str, str] | None = None,
+        extract_archive: bool = True,
+        chmod: str | None = None,
+        post_deploy_cmd: str | None = None,
+        target_names: list[str] | None = None,
+        board_type: str | None = None,
+        arch: str | None = None,
+        tags: list[str] | None = None,
+        include_offline: bool = False,
+    ) -> dict[str, Any]:
+        """Single-procedure fleet deployment: deploy a folder structure, archive, file, or inline content
+        across all (or filtered) lab targets concurrently.
+        """
+        if target_names:
+            specs = [self.pool.get_device(n) for n in target_names]
+            targets = [s.name for s in specs if s is not None]
+        else:
+            candidates = self.devices(board_type=board_type, arch=arch, tags=tags)
+            if not include_offline:
+                candidates = [c for c in candidates if c.state != "offline"]
+            targets = [c.name for c in candidates]
+
+        results: dict[str, dict[str, Any]] = {}
+
+        def _deploy_one(dev_name: str) -> tuple[str, dict[str, Any]]:
+            try:
+                res = self.deploy_to_device(
+                    name=dev_name,
+                    remote_path=remote_path,
+                    local_path=local_path,
+                    content=content,
+                    filename=filename,
+                    structure=structure,
+                    extract_archive=extract_archive,
+                    chmod=chmod,
+                    post_deploy_cmd=post_deploy_cmd,
+                )
+                return dev_name, res
+            except Exception as exc:
+                return dev_name, {"device": dev_name, "ok": False, "error": str(exc)}
+
+        if targets:
+            with ThreadPoolExecutor(max_workers=min(16, len(targets))) as executor:
+                futures = [executor.submit(_deploy_one, t) for t in targets]
+                for fut in as_completed(futures):
+                    d_name, outcome = fut.result()
+                    results[d_name] = outcome
+
+        succeeded = sum(1 for r in results.values() if r.get("ok"))
+        failed = len(results) - succeeded
+        return {
+            "total_targets": len(results),
+            "succeeded": succeeded,
+            "failed": failed,
+            "remote_path": remote_path,
+            "targets": sorted(results.keys()),
+            "results": results,
+        }
 
     def devices(
         self,
@@ -511,3 +604,64 @@ class RemoteLabClient:
             out_file.write_text(resp.get("combined_text", ""), encoding="utf-8")
             resp["saved_path"] = str(out_file)
         return resp
+
+    def deploy_to_device(
+        self,
+        name: str,
+        remote_path: str,
+        local_path: str | Path | None = None,
+        content: str | None = None,
+        filename: str | None = None,
+        structure: dict[str, str] | None = None,
+        extract_archive: bool = True,
+        chmod: str | None = None,
+        post_deploy_cmd: str | None = None,
+    ) -> dict[str, Any]:
+        """Deploy files, folders, archives, or inline content to a specific device via REST API."""
+        return self._request(
+            "POST",
+            f"/api/v1/devices/{urllib.parse.quote(name)}/deploy",
+            {
+                "remote_path": remote_path,
+                "local_path": str(local_path) if local_path else None,
+                "content": content,
+                "filename": filename,
+                "structure": structure,
+                "extract_archive": extract_archive,
+                "chmod": chmod,
+                "post_deploy_cmd": post_deploy_cmd,
+            },
+        )
+
+    def deploy_to_lab(
+        self,
+        remote_path: str,
+        local_path: str | Path | None = None,
+        content: str | None = None,
+        filename: str | None = None,
+        structure: dict[str, str] | None = None,
+        extract_archive: bool = True,
+        chmod: str | None = None,
+        post_deploy_cmd: str | None = None,
+        target_names: list[str] | None = None,
+        board_type: str | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Deploy a folder structure, archive, file, or content to all (or filtered) lab targets in one procedure."""
+        return self._request(
+            "POST",
+            "/api/v1/deploy",
+            {
+                "remote_path": remote_path,
+                "local_path": str(local_path) if local_path else None,
+                "content": content,
+                "filename": filename,
+                "structure": structure,
+                "extract_archive": extract_archive,
+                "chmod": chmod,
+                "post_deploy_cmd": post_deploy_cmd,
+                "target_names": target_names,
+                "board_type": board_type,
+                "tags": tags,
+            },
+        )

@@ -299,6 +299,46 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <button class="btn" style="margin-bottom:0.75rem;" onclick="runQuickCommand()">Execute Command</button>
           <label>Console Output</label>
           <pre class="console" id="quick-output">Ready.</pre>
+          <hr style="border:0; border-top:1px solid var(--border); margin:1rem 0;" />
+          <h4 style="margin:0 0 0.5rem 0;">Deploy Files / Folder Structure / Archive</h4>
+          <div class="form-row">
+            <div>
+              <label>Deployment Target Scope</label>
+              <select id="deploy-scope">
+                <option value="__ALL__">All Online Lab Targets (Broadcast)</option>
+                <option value="__SELECTED__">Currently Selected Device Only</option>
+              </select>
+            </div>
+            <div>
+              <label>Remote Destination Path</label>
+              <input id="deploy-remote-path" value="/opt/damf_toolkit" />
+            </div>
+          </div>
+          <div class="form-row">
+            <div>
+              <label>Local File / Folder / Archive Path (optional)</label>
+              <input id="deploy-local-path" placeholder="/path/to/archive.tar.gz or folder" />
+            </div>
+            <div>
+              <label>Or Inline Filename</label>
+              <input id="deploy-filename" value="env_setup.sh" />
+            </div>
+          </div>
+          <label>Inline File Content or JSON Folder Structure (e.g. {"bin/run.sh": "#!/bin/sh..."})</label>
+          <textarea id="deploy-content" rows="3">#!/bin/sh
+export DAMF_LAB_ENV=production
+echo "DAMF toolkit initialized on $(hostname)"</textarea>
+          <div class="form-row">
+            <div>
+              <label>Permissions (chmod)</label>
+              <input id="deploy-chmod" value="755" />
+            </div>
+            <div>
+              <label>Post-Deploy Command (optional)</label>
+              <input id="deploy-post-cmd" placeholder="sh /opt/damf_toolkit/env_setup.sh" />
+            </div>
+          </div>
+          <button class="btn" onclick="runGuiDeploy()">Deploy to Target(s)</button>
         </div>
       </div>
     </section>
@@ -781,6 +821,54 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     async function copySelectedSystemLogs() {
       const dev = document.getElementById('quick-device').value;
       if (dev) await copyDeviceSystemLogs(dev);
+    }
+
+    async function runGuiDeploy() {
+      const scope = document.getElementById('deploy-scope').value;
+      const remotePath = document.getElementById('deploy-remote-path').value.trim() || '/tmp/damf_deploy';
+      const localPath = document.getElementById('deploy-local-path').value.trim();
+      const filename = document.getElementById('deploy-filename').value.trim();
+      const rawContent = document.getElementById('deploy-content').value;
+      const chmod = document.getElementById('deploy-chmod').value.trim();
+      const postCmd = document.getElementById('deploy-post-cmd').value.trim();
+
+      const payload = {
+        remote_path: remotePath,
+        chmod: chmod || null,
+        post_deploy_cmd: postCmd || null,
+        extract_archive: true
+      };
+
+      if (localPath) {
+        payload.local_path = localPath;
+      } else if (rawContent.trim().startsWith('{') && rawContent.trim().endsWith('}')) {
+        try {
+          payload.structure = JSON.parse(rawContent);
+        } catch (e) {
+          payload.content = rawContent;
+          payload.filename = filename || 'deployed_file.txt';
+        }
+      } else {
+        payload.content = rawContent;
+        payload.filename = filename || 'deployed_file.txt';
+      }
+
+      if (scope === '__ALL__') {
+        const res = await api('/api/v1/deploy', 'POST', payload);
+        document.getElementById('quick-output').textContent =
+          `[Lab-Wide Broadcast Deployment Complete]\\n` +
+          `Destination : ${res.remote_path}\\n` +
+          `Targets     : ${res.succeeded}/${res.total_targets} succeeded (${(res.targets || []).join(', ')})`;
+      } else {
+        const dev = document.getElementById('quick-device').value;
+        const res = await api(`/api/v1/devices/${encodeURIComponent(dev)}/deploy`, 'POST', payload);
+        document.getElementById('quick-output').textContent =
+          `[Deployed to ${res.device}]\\n` +
+          `Mode        : ${res.mode}\\n` +
+          `Items       : ${(res.deployed_items || []).join(', ')}\\n` +
+          `${res.post_deploy_output || ''}`;
+      }
+      await refreshAll();
     }
 
     async function reserveDevice(name) {
