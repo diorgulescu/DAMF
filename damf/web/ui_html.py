@@ -116,16 +116,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       background: var(--accent-dark);
       color: white;
       border: none;
-      padding: 0.48rem 0.9rem;
+      padding: 0.45rem 0.82rem;
       border-radius: 6px;
       cursor: pointer;
       font-weight: 600;
-      font-size: 0.85rem;
+      font-size: 0.82rem;
     }
     .btn:hover { background: var(--accent); color: #0b1120; }
     .btn-secondary {
       background: #334155;
       color: var(--text);
+    }
+    .btn-warning {
+      background: #b45309;
+      color: #fef3c7;
     }
     .btn-danger {
       background: #991b1b;
@@ -134,17 +138,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 0.9rem;
+      font-size: 0.88rem;
     }
     th, td {
       text-align: left;
-      padding: 0.75rem 0.85rem;
+      padding: 0.7rem 0.75rem;
       border-bottom: 1px solid var(--border);
     }
     th {
       color: var(--muted);
       font-weight: 600;
-      font-size: 0.78rem;
+      font-size: 0.76rem;
       text-transform: uppercase;
     }
     .pill {
@@ -174,22 +178,31 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       grid-template-columns: 2fr 1fr;
       gap: 1.25rem;
     }
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.65rem;
+    }
     @media (max-width: 900px) {
-      .grid-2 { grid-template-columns: 1fr; }
+      .grid-2, .form-row { grid-template-columns: 1fr; }
     }
     input, select, textarea {
       width: 100%;
-      padding: 0.5rem 0.65rem;
+      padding: 0.48rem 0.65rem;
       background: #0b1120;
       border: 1px solid var(--border);
       color: var(--text);
       border-radius: 6px;
-      margin-top: 0.25rem;
-      margin-bottom: 0.75rem;
-      font-size: 0.88rem;
+      margin-top: 0.22rem;
+      margin-bottom: 0.65rem;
+      font-size: 0.86rem;
+    }
+    input[type="checkbox"] {
+      width: auto;
+      margin-right: 0.4rem;
     }
     label {
-      font-size: 0.8rem;
+      font-size: 0.78rem;
       color: var(--muted);
       font-weight: 600;
     }
@@ -199,13 +212,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       padding: 0.85rem;
       border-radius: 8px;
       color: #38bdf8;
-      font-size: 0.82rem;
+      font-size: 0.81rem;
       overflow-x: auto;
-      min-height: 90px;
+      min-height: 95px;
+      white-space: pre-wrap;
     }
     #topology-svg {
       width: 100%;
-      height: 460px;
+      height: 470px;
       background: #0b1120;
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -260,7 +274,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               <tr>
                 <th>Board</th>
                 <th>Type / Arch</th>
-                <th>IP / Transport</th>
+                <th>IP / SSH</th>
                 <th>State</th>
                 <th>Owner</th>
               </tr>
@@ -269,15 +283,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </table>
         </div>
         <div class="card">
-          <h3 style="margin-top:0">Quick Command &amp; Test Runner</h3>
+          <h3 style="margin-top:0">SSH &amp; Target Operations Console</h3>
           <label>Target Device</label>
           <select id="quick-device"></select>
-          <label>Shell / ADB / Serial Command</label>
-          <input id="quick-cmd" value="uname -a && cat /proc/cpuinfo" />
-          <div style="display:flex; gap:0.5rem; margin-bottom:0.75rem;">
-            <button class="btn" onclick="runQuickCommand()">Execute Command</button>
-            <button class="btn btn-secondary" onclick="runQuickTestSuite()">Run Smoke Test Job</button>
+          <div style="display:flex; gap:0.45rem; flex-wrap:wrap; margin-bottom:0.65rem;">
+            <button class="btn" onclick="connectSelectedSSH()">Connect SSH &amp; Detect OS</button>
+            <button class="btn btn-warning" onclick="rebootSelectedSSH()">Reboot Target (SSH)</button>
+            <button class="btn btn-secondary" onclick="runQuickTestSuite()">Run Smoke Suite</button>
           </div>
+          <label>Shell / SSH / ADB Command</label>
+          <input id="quick-cmd" value="uname -a && cat /etc/os-release" />
+          <button class="btn" style="margin-bottom:0.75rem;" onclick="runQuickCommand()">Execute Command</button>
           <label>Console Output</label>
           <pre class="console" id="quick-output">Ready.</pre>
         </div>
@@ -299,8 +315,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <thead>
               <tr>
                 <th>Name</th>
-                <th>Board Type</th>
-                <th>IP / Subnet</th>
+                <th>Board / OS</th>
+                <th>SSH / IP / Subnet</th>
                 <th>Power</th>
                 <th>State</th>
                 <th>Actions</th>
@@ -310,29 +326,73 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </table>
         </div>
         <div class="card">
-          <h3 style="margin-top:0">Add / Edit Device</h3>
-          <label>Device Name</label>
-          <input id="dev-name" placeholder="e.g. rpi4-rack2-01" />
-          <label>Board Type</label>
-          <input id="dev-type" placeholder="raspberry-pi-4, ti-am62x, android..." value="raspberry-pi-4" />
-          <label>Architecture</label>
-          <input id="dev-arch" value="arm64" />
-          <label>IP Address</label>
-          <input id="dev-ip" placeholder="192.168.10.150" />
-          <label>Subnet CIDR</label>
-          <input id="dev-subnet" value="192.168.10.0/24" />
-          <label>Transport</label>
-          <select id="dev-transport">
-            <option value="ssh">ssh</option>
-            <option value="serial">serial</option>
-            <option value="adb">adb</option>
-            <option value="local">local</option>
-          </select>
+          <h3 style="margin-top:0">Define / Edit Device in Lab</h3>
+          <div class="form-row">
+            <div>
+              <label>Device Name</label>
+              <input id="dev-name" placeholder="e.g. rpi4-rack2-01" />
+            </div>
+            <div>
+              <label>Board Type</label>
+              <input id="dev-type" placeholder="raspberry-pi-4, ti-am62x..." value="raspberry-pi-4" />
+            </div>
+          </div>
+          <div class="form-row">
+            <div>
+              <label>IP Address</label>
+              <input id="dev-ip" placeholder="192.168.10.150" />
+            </div>
+            <div>
+              <label>Subnet CIDR</label>
+              <input id="dev-subnet" value="192.168.10.0/24" />
+            </div>
+          </div>
+          <div class="form-row">
+            <div>
+              <label>Transport</label>
+              <select id="dev-transport">
+                <option value="ssh">ssh</option>
+                <option value="serial">serial</option>
+                <option value="adb">adb</option>
+                <option value="local">local</option>
+              </select>
+            </div>
+            <div>
+              <label>Architecture</label>
+              <input id="dev-arch" value="arm64" />
+            </div>
+          </div>
+          <div class="form-row">
+            <div>
+              <label>SSH Username</label>
+              <input id="dev-ssh-user" value="root" />
+            </div>
+            <div>
+              <label>SSH Port</label>
+              <input id="dev-ssh-port" type="number" value="22" />
+            </div>
+          </div>
+          <div class="form-row">
+            <div>
+              <label>SSH Key Path (optional)</label>
+              <input id="dev-ssh-key" placeholder="~/.ssh/id_ed25519" />
+            </div>
+            <div>
+              <label>Target OS Hint</label>
+              <input id="dev-os-hint" placeholder="debian, busybox, yocto, freebsd..." />
+            </div>
+          </div>
           <label>Tags (comma-separated)</label>
           <input id="dev-tags" placeholder="gpio, i2c, can-bus" />
-          <label>Connected Peers (comma-separated device names)</label>
+          <label>Connected Topology Peers (comma-separated device names)</label>
           <input id="dev-peers" placeholder="ti-am62x-evm-01" />
-          <button class="btn" onclick="saveDevice()">Save Device</button>
+          <div style="margin: 0.35rem 0 0.85rem;">
+            <label style="cursor:pointer; color:var(--text);">
+              <input type="checkbox" id="dev-simulated" checked />
+              Simulated Mode (uncheck for live network SSH connection)
+            </label>
+          </div>
+          <button class="btn" onclick="saveDevice()">Save Device to Pool &amp; Topology</button>
         </div>
       </div>
     </section>
@@ -343,14 +403,52 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="card">
           <div class="toolbar">
             <h3 style="margin:0">Dynamic Lab Network &amp; Topology View</h3>
-            <span style="color:var(--muted); font-size:0.82rem;">Click any board node to inspect details &amp; connections</span>
+            <span style="color:var(--muted); font-size:0.82rem;">Click any board node to inspect, connect via SSH, or reboot</span>
           </div>
-          <svg id="topology-svg" viewBox="0 0 860 440"></svg>
+          <svg id="topology-svg" viewBox="0 0 860 450"></svg>
         </div>
-        <div class="card">
-          <h3 style="margin-top:0">Selected Node Inspector</h3>
-          <div id="node-inspector" style="color:var(--muted); font-size:0.9rem;">
-            Select a device node in the topology diagram to inspect its subnet, hardware profile, power status, and peer links.
+        <div style="display:flex; flex-direction:column; gap:1.15rem;">
+          <div class="card">
+            <h3 style="margin-top:0">Selected Node Inspector</h3>
+            <div id="node-inspector" style="color:var(--muted); font-size:0.88rem;">
+              Select a device node in the topology diagram to inspect its subnet, SSH endpoint, detected OS, and peer links.
+            </div>
+          </div>
+          <div class="card">
+            <h3 style="margin-top:0">Quick-Add Device to Topology</h3>
+            <div class="form-row">
+              <div>
+                <label>Device Name</label>
+                <input id="topo-dev-name" placeholder="ti-sitara-02" />
+              </div>
+              <div>
+                <label>Board Type</label>
+                <input id="topo-dev-type" value="ti-am62x" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div>
+                <label>IP Address</label>
+                <input id="topo-dev-ip" placeholder="192.168.10.120" />
+              </div>
+              <div>
+                <label>Subnet CIDR</label>
+                <input id="topo-dev-subnet" value="192.168.10.0/24" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div>
+                <label>SSH User</label>
+                <input id="topo-dev-user" value="root" />
+              </div>
+              <div>
+                <label>Target OS</label>
+                <input id="topo-dev-os" placeholder="poky / debian / busybox" value="poky" />
+              </div>
+            </div>
+            <label>Connect to Peer Node(s)</label>
+            <input id="topo-dev-peers" placeholder="rpi4-lab-01" />
+            <button class="btn" onclick="saveTopologyDevice()">Add Node to Topology</button>
           </div>
         </div>
       </div>
@@ -406,6 +504,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <script>
     let cachedDevices = [];
     let cachedTopology = { subnets: {}, devices: [], links: [] };
+    let selectedNodeName = null;
 
     function switchTab(tab) {
       document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
@@ -439,7 +538,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       cachedDevices = devResp.devices || [];
       cachedTopology = topoResp;
 
-      // Dashboard table & dropdown
       const dashBody = document.getElementById('dashboard-devices-body');
       const select = document.getElementById('quick-device');
       const currentVal = select.value;
@@ -447,21 +545,23 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       select.innerHTML = '';
       cachedDevices.forEach(d => {
         const pillClass = 'pill-' + (d.state || 'available');
+        const user = (d.transport_config && d.transport_config.user) || 'root';
+        const port = (d.transport_config && d.transport_config.port) || 22;
+        const endpoint = d.ip_address ? `${user}@${d.ip_address}:${port}` : 'local';
         dashBody.innerHTML += `<tr>
           <td><strong>${d.name}</strong></td>
           <td>${d.board_type} <span class="tag">${d.arch}</span></td>
-          <td>${d.ip_address || 'local'} <span class="tag">${d.transport}</span></td>
+          <td><code>${endpoint}</code> <span class="tag">${d.transport}</span></td>
           <td><span class="pill ${pillClass}">${d.state}</span></td>
           <td>${d.owner || '—'}</td>
         </tr>`;
         const opt = document.createElement('option');
         opt.value = d.name;
-        opt.textContent = `${d.name} (${d.board_type})`;
+        opt.textContent = `${d.name} (${d.board_type} - ${d.ip_address || d.transport})`;
         select.appendChild(opt);
       });
       if (currentVal) select.value = currentVal;
 
-      // Devices management table
       const devBody = document.getElementById('devices-table-body');
       devBody.innerHTML = '';
       cachedDevices.forEach(d => {
@@ -471,14 +571,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           : `<button class="btn" onclick="reserveDevice('${d.name}')">Reserve</button>`;
         const pwrAction = d.power_state === 'on' ? 'off' : 'on';
         const tagsHtml = (d.tags || []).map(t => `<span class="tag">${t}</span>`).join('');
+        const osInfo = (d.attributes && d.attributes.os_info && d.attributes.os_info.pretty_name) || d.deployed_image || '—';
+        const user = (d.transport_config && d.transport_config.user) || 'root';
+        const port = (d.transport_config && d.transport_config.port) || 22;
         devBody.innerHTML += `<tr>
           <td><strong>${d.name}</strong><br/>${tagsHtml}</td>
-          <td>${d.board_type} (${d.arch})</td>
-          <td>${d.ip_address || '—'}<br/><small style="color:var(--muted)">${d.subnet}</small></td>
+          <td>${d.board_type} (${d.arch})<br/><small style="color:var(--muted)">${osInfo}</small></td>
+          <td><code>${user}@${d.ip_address || 'local'}:${port}</code><br/><small style="color:var(--muted)">${d.subnet}</small></td>
           <td><span class="tag">${d.power_state}</span></td>
           <td><span class="pill ${pillClass}">${d.state}</span></td>
           <td style="display:flex; gap:0.35rem; flex-wrap:wrap;">
             ${resBtn}
+            <button class="btn btn-secondary" onclick="connectDeviceSSH('${d.name}')">SSH Connect</button>
+            <button class="btn btn-warning" onclick="rebootDeviceSSH('${d.name}')">Reboot (SSH)</button>
             <button class="btn btn-secondary" onclick="powerDevice('${d.name}', '${pwrAction}')">Power ${pwrAction.toUpperCase()}</button>
             <button class="btn btn-secondary" onclick="populateEdit('${d.name}')">Edit</button>
             <button class="btn btn-danger" onclick="deleteDevice('${d.name}')">Delete</button>
@@ -486,7 +591,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </tr>`;
       });
 
-      // Jobs table
       const jobsBody = document.getElementById('jobs-table-body');
       jobsBody.innerHTML = '';
       (jobsResp.jobs || []).forEach(j => {
@@ -501,7 +605,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </tr>`;
       });
 
-      // Settings form
       document.getElementById('header-lab-name').textContent = settingsResp.lab_name || 'DAMF';
       document.getElementById('cfg-lab-name').value = settingsResp.lab_name || '';
       document.getElementById('cfg-lab-scope').value = settingsResp.lab_scope || '';
@@ -512,6 +615,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       document.getElementById('cfg-smtp').value = settingsResp.smtp_server || '';
 
       renderTopology();
+      if (selectedNodeName) inspectNode(selectedNodeName);
     }
 
     function renderTopology() {
@@ -522,10 +626,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const nodeCoords = {};
 
       subnets.forEach(([subnetName, devs], sIdx) => {
-        const boxX = 24 + sIdx * 275;
-        const boxY = 24;
-        const boxW = 250;
-        const boxH = 390;
+        const boxX = 20 + sIdx * 275;
+        const boxY = 20;
+        const boxW = 255;
+        const boxH = 410;
 
         svg.innerHTML += `<rect x="${boxX}" y="${boxY}" width="${boxW}" height="${boxH}" rx="10"
           fill="#111c33" stroke="#334155" stroke-dasharray="5,4" />
@@ -534,13 +638,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </text>`;
 
         devs.forEach((d, dIdx) => {
-          const cx = boxX + 125;
-          const cy = boxY + 85 + dIdx * 95;
+          const cx = boxX + 127;
+          const cy = boxY + 82 + dIdx * 85;
           nodeCoords[d.name] = { x: cx, y: cy, device: d };
         });
       });
 
-      // Draw peer links first
       (cachedTopology.links || []).forEach(link => {
         const a = nodeCoords[link.source];
         const b = nodeCoords[link.target];
@@ -550,35 +653,73 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         }
       });
 
-      // Draw nodes
       Object.values(nodeCoords).forEach(({ x, y, device }) => {
         const strokeColor = device.state === 'reserved' ? '#f59e0b' : '#22c55e';
         svg.innerHTML += `<g style="cursor:pointer" onclick="inspectNode('${device.name}')">
-          <rect x="${x - 95}" y="${y - 28}" width="190" height="56" rx="8"
+          <rect x="${x - 98}" y="${y - 26}" width="196" height="52" rx="8"
             fill="#1e293b" stroke="${strokeColor}" stroke-width="2" />
-          <text x="${x}" y="${y - 5}" text-anchor="middle" fill="#f8fafc" font-size="13" font-weight="bold">${device.name}</text>
-          <text x="${x}" y="${y + 15}" text-anchor="middle" fill="#94a3b8" font-size="11">${device.board_type} • ${device.ip_address || device.transport}</text>
+          <text x="${x}" y="${y - 4}" text-anchor="middle" fill="#f8fafc" font-size="12.5" font-weight="bold">${device.name}</text>
+          <text x="${x}" y="${y + 14}" text-anchor="middle" fill="#94a3b8" font-size="10.5">${device.board_type} • ${device.ip_address || device.transport}</text>
         </g>`;
       });
     }
 
     function inspectNode(name) {
+      selectedNodeName = name;
       const d = cachedDevices.find(x => x.name === name);
       if (!d) return;
+      const user = (d.transport_config && d.transport_config.user) || 'root';
+      const port = (d.transport_config && d.transport_config.port) || 22;
+      const osInfo = (d.attributes && d.attributes.os_info) || {};
+      const lastReboot = (d.attributes && d.attributes.last_reboot_command) || osInfo.reboot_command || 'Auto-detect on reboot';
       const el = document.getElementById('node-inspector');
       el.innerHTML = `
         <h4 style="margin-top:0; color:var(--text)">${d.name}</h4>
-        <p><strong>Board Type:</strong> ${d.board_type} (${d.arch})</p>
-        <p><strong>CPU:</strong> ${d.cpu || '—'}</p>
-        <p><strong>IP / Subnet:</strong> ${d.ip_address || 'N/A'} (${d.subnet})</p>
-        <p><strong>MAC Address:</strong> ${d.mac_address || 'N/A'}</p>
-        <p><strong>Transport:</strong> ${d.transport}</p>
+        <p><strong>Board Type / Arch:</strong> ${d.board_type} (${d.arch})</p>
+        <p><strong>SSH Endpoint:</strong> <code>ssh -p ${port} ${user}@${d.ip_address || 'local'}</code></p>
+        <p><strong>Subnet:</strong> ${d.subnet}</p>
         <p><strong>State / Power:</strong> ${d.state} / ${d.power_state}</p>
-        <p><strong>Deployed Image:</strong> ${d.deployed_image || '—'}</p>
+        <p><strong>Detected OS:</strong> ${osInfo.pretty_name || d.deployed_image || 'Not probed yet'}</p>
+        <p><strong>OS Reboot Cmd:</strong> <code>${lastReboot}</code></p>
         <p><strong>Connected Peers:</strong> ${(d.connected_to || []).join(', ') || 'None'}</p>
-        <p><strong>Tags:</strong> ${(d.tags || []).join(', ')}</p>
-        <a class="btn btn-secondary" href="/api/v1/devices/${encodeURIComponent(d.name)}/export" target="_blank" style="text-decoration:none; display:inline-block; margin-top:0.5rem;">Export YAML/JSON</a>
+        <div style="display:flex; gap:0.4rem; flex-wrap:wrap; margin-top:0.65rem;">
+          <button class="btn" onclick="connectDeviceSSH('${d.name}')">Connect SSH &amp; Probe OS</button>
+          <button class="btn btn-warning" onclick="rebootDeviceSSH('${d.name}')">Reboot via SSH</button>
+          <a class="btn btn-secondary" href="/api/v1/devices/${encodeURIComponent(d.name)}/export" target="_blank" style="text-decoration:none;">Export YAML</a>
+        </div>
       `;
+    }
+
+    async function connectDeviceSSH(name) {
+      const res = await api(`/api/v1/devices/${encodeURIComponent(name)}/connect`, 'POST', {});
+      const os = res.os_info || {};
+      document.getElementById('quick-output').textContent =
+        `[SSH Connected to ${res.user}@${res.host}:${res.port}]\\n` +
+        `Interactive CLI: ${res.interactive_cmd}\\n` +
+        `Detected OS: ${os.pretty_name} (kernel=${os.kernel}, distro=${os.distro}, init=${os.init_system})\\n` +
+        `Context Reboot Command: ${os.reboot_command}`;
+      await refreshAll();
+    }
+
+    async function rebootDeviceSSH(name) {
+      const res = await api(`/api/v1/devices/${encodeURIComponent(name)}/reboot`, 'POST', { via_ssh: true });
+      const os = res.os_info || {};
+      document.getElementById('quick-output').textContent =
+        `[SSH Reboot Issued on ${name}]\\n` +
+        `Detected OS: ${os.pretty_name || 'Linux'}\\n` +
+        `Reboot Command Executed: ${res.reboot_command}\\n` +
+        `${res.stdout || ''}`;
+      await refreshAll();
+    }
+
+    async function connectSelectedSSH() {
+      const dev = document.getElementById('quick-device').value;
+      if (dev) await connectDeviceSSH(dev);
+    }
+
+    async function rebootSelectedSSH() {
+      const dev = document.getElementById('quick-device').value;
+      if (dev) await rebootDeviceSSH(dev);
     }
 
     async function reserveDevice(name) {
@@ -610,6 +751,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       document.getElementById('dev-ip').value = d.ip_address;
       document.getElementById('dev-subnet').value = d.subnet;
       document.getElementById('dev-transport').value = d.transport;
+      document.getElementById('dev-ssh-user').value = (d.transport_config && d.transport_config.user) || 'root';
+      document.getElementById('dev-ssh-port').value = (d.transport_config && d.transport_config.port) || 22;
+      document.getElementById('dev-ssh-key').value = (d.transport_config && d.transport_config.identity_file) || '';
+      document.getElementById('dev-os-hint').value = (d.attributes && d.attributes.os) || '';
+      document.getElementById('dev-simulated').checked = Boolean(d.transport_config && d.transport_config.simulated);
       document.getElementById('dev-tags').value = (d.tags || []).join(', ');
       document.getElementById('dev-peers').value = (d.connected_to || []).join(', ');
     }
@@ -622,12 +768,33 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         ip_address: document.getElementById('dev-ip').value.trim(),
         subnet: document.getElementById('dev-subnet').value.trim(),
         transport: document.getElementById('dev-transport').value,
-        transport_config: { simulated: true },
+        ssh_user: document.getElementById('dev-ssh-user').value.trim() || 'root',
+        ssh_port: parseInt(document.getElementById('dev-ssh-port').value || '22', 10),
+        identity_file: document.getElementById('dev-ssh-key').value.trim(),
+        os_hint: document.getElementById('dev-os-hint').value.trim(),
+        simulated: document.getElementById('dev-simulated').checked,
         tags: document.getElementById('dev-tags').value.split(',').map(s => s.trim()).filter(Boolean),
         connected_to: document.getElementById('dev-peers').value.split(',').map(s => s.trim()).filter(Boolean),
       };
       if (!payload.name) return;
       await api('/api/v1/devices', 'POST', payload);
+      await refreshAll();
+    }
+
+    async function saveTopologyDevice() {
+      const payload = {
+        name: document.getElementById('topo-dev-name').value.trim(),
+        board_type: document.getElementById('topo-dev-type').value.trim() || 'generic-linux',
+        ip_address: document.getElementById('topo-dev-ip').value.trim(),
+        subnet: document.getElementById('topo-dev-subnet').value.trim() || '192.168.10.0/24',
+        ssh_user: document.getElementById('topo-dev-user').value.trim() || 'root',
+        os_hint: document.getElementById('topo-dev-os').value.trim(),
+        simulated: true,
+        connected_to: document.getElementById('topo-dev-peers').value.split(',').map(s => s.trim()).filter(Boolean),
+      };
+      if (!payload.name) return;
+      await api('/api/v1/topology/devices', 'POST', payload);
+      selectedNodeName = payload.name;
       await refreshAll();
     }
 

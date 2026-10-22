@@ -10,7 +10,14 @@ from typing import Any, Callable
 from damf.exceptions import TransportError
 from damf.models import CommandResult, DeviceSpec, TestCaseResult, TestSuiteResult
 from damf.power import PowerController, create_power_controller
-from damf.transports import SerialTransport, Transport, create_transport
+from damf.transports import (
+    SerialTransport,
+    SSHTransport,
+    Transport,
+    create_transport,
+    determine_reboot_command,
+    parse_os_probe_output,
+)
 
 
 class Device:
@@ -63,6 +70,44 @@ class Device:
         self.transport.connect()
         return self
 
+    def connect_ssh(self, verify_auth: bool = False) -> dict[str, Any]:
+        """Connect to the target over SSH, detect its running OS, and return connection details."""
+        ssh = self.transport if isinstance(self.transport, SSHTransport) else SSHTransport(self.spec)
+        ssh.connect(verify_auth=verify_auth)
+        self.transport.connected = True
+        os_info = ssh.detect_os(force_refresh=True)
+        return {
+            "device": self.name,
+            "connected": True,
+            "host": ssh.host,
+            "port": ssh.port,
+            "user": ssh.user,
+            "ssh_banner": self.spec.attributes.get("ssh_banner", ""),
+            "os_info": os_info,
+            "interactive_cmd": " ".join(ssh.build_interactive_ssh_command()),
+        }
+
+    def detect_os(self, force_refresh: bool = False) -> dict[str, str]:
+        """Detect the OS, distribution, and init system running on the target."""
+        if isinstance(self.transport, SSHTransport):
+            return self.transport.detect_os(force_refresh=force_refresh)
+        if not force_refresh and isinstance(self.spec.attributes.get("os_info"), dict):
+            return dict(self.spec.attributes["os_info"])
+
+        probe_script = (
+            "echo __DAMF_KERNEL__; uname -s 2>/dev/null || true; "
+            "echo __DAMF_ARCH__; uname -m 2>/dev/null || true; "
+            "echo __DAMF_OS_RELEASE__; cat /etc/os-release 2>/dev/null || true; "
+            "echo __DAMF_INIT__; ps -p 1 -o comm= 2>/dev/null || true"
+        )
+        res = self.run(probe_script, timeout=10.0)
+        fallback = f"{self.spec.attributes.get('os', '')} {self.spec.deployed_image} {self.spec.board_type}".strip()
+        os_info = parse_os_probe_output(res.stdout if res.ok else "", fallback_hint=fallback)
+        user = str(self.spec.transport_config.get("user", "root"))
+        os_info["reboot_command"] = determine_reboot_command(os_info, user=user)
+        self.spec.attributes["os_info"] = os_info
+        return os_info
+
     def disconnect(self) -> None:
         """Close the transport connection."""
         self.transport.disconnect()
@@ -92,10 +137,36 @@ class Device:
         self.logger.info("Powering off %s", self.name)
         self.power.power_off()
 
-    def reboot(self, delay_sec: float = 0.2) -> None:
-        """Power cycle the device."""
+    def reboot(
+        self,
+        delay_sec: float = 0.2,
+        via_ssh: bool | None = None,
+        force_os_probe: bool = False,
+    ) -> CommandResult:
+        """Reboot the device.
+
+        By default, for SSH-capable targets (or when `via_ssh=True`), detects the running
+        Linux/Unix OS over SSH and issues the appropriate OS-specific reboot command.
+        """
         self.logger.info("Rebooting %s", self.name)
+        use_ssh = via_ssh if via_ssh is not None else (
+            isinstance(self.transport, SSHTransport)
+            or self.spec.power_type == "ssh"
+            or (bool(self.spec.ip_address) and self.spec.transport in ("ssh", "serial"))
+        )
+        if use_ssh:
+            ssh = self.transport if isinstance(self.transport, SSHTransport) else SSHTransport(self.spec)
+            res = ssh.reboot_over_ssh(force_os_probe=force_os_probe)
+            self.spec.power_state = "on"
+            return res
+
         self.power.reboot(delay_sec=delay_sec)
+        return CommandResult(
+            command="power_controller.reboot",
+            returncode=0,
+            stdout=f"Power cycled {self.name}\n",
+            device_name=self.name,
+        )
 
     def reset(self) -> None:
         """Alias for reboot()."""

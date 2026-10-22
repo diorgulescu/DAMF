@@ -44,6 +44,7 @@ from damf.power import (
     IPMIPowerController,
     PowerController,
     SimulatedPowerController,
+    SSHPowerController,
     USBHubPowerController,
     WebhookPowerController,
     create_power_controller,
@@ -56,6 +57,8 @@ from damf.transports import (
     SSHTransport,
     Transport,
     create_transport,
+    determine_reboot_command,
+    parse_os_probe_output,
 )
 from damf.web import DAMFWebApp, create_http_server
 
@@ -90,8 +93,11 @@ __all__ = [
     "ADBTransport",
     "LocalTransport",
     "create_transport",
+    "parse_os_probe_output",
+    "determine_reboot_command",
     "PowerController",
     "SimulatedPowerController",
+    "SSHPowerController",
     "WebhookPowerController",
     "USBHubPowerController",
     "IPMIPowerController",

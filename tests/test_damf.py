@@ -27,9 +27,11 @@ from damf import (
     ResultParser,
     SerialScanner,
     create_http_server,
+    determine_reboot_command,
     dump_yaml,
     lookup_mac_vendor,
     normalize_mac,
+    parse_os_probe_output,
     safe_load_yaml,
 )
 from damf.cli import main as cli_main
@@ -202,43 +204,49 @@ class TestStep4PoolLabAndResults(unittest.TestCase):
 
     def test_lab_acquire_release_and_conflict(self) -> None:
         lab = Lab(db_path=":memory:", seed_demo=True)
-        self.assertGreaterEqual(len(lab.devices()), 5)
+        try:
+            self.assertGreaterEqual(len(lab.devices()), 5)
 
-        with lab.acquire(board_type="raspberry-pi-4", owner="tester-1") as dev:
-            self.assertEqual(dev.board_type, "raspberry-pi-4")
-            # Attempting to reserve the same device by another user raises DeviceBusyError
-            with self.assertRaises(DeviceBusyError):
-                lab.pool.reserve(name=dev.name, owner="tester-2")
+            with lab.acquire(board_type="raspberry-pi-4", owner="tester-1") as dev:
+                self.assertEqual(dev.board_type, "raspberry-pi-4")
+                # Attempting to reserve the same device by another user raises DeviceBusyError
+                with self.assertRaises(DeviceBusyError):
+                    lab.pool.reserve(name=dev.name, owner="tester-2")
 
-            suite = lab.run_test_suite(dev, commands={"check_uname": "uname -a"}, suite_name="smoke")
-            self.assertEqual(suite.passed, 1)
-            self.assertEqual(suite.failed, 0)
+                suite = lab.run_test_suite(dev, commands={"check_uname": "uname -a"}, suite_name="smoke")
+                self.assertEqual(suite.passed, 1)
+                self.assertEqual(suite.failed, 0)
 
-        # After exiting the `with` block, the device is automatically released
-        spec_after = lab.pool.get_device(dev.name)
-        assert spec_after is not None
-        self.assertEqual(spec_after.state, "available")
-        self.assertEqual(spec_after.owner, "")
+            # After exiting the `with` block, the device is automatically released
+            spec_after = lab.pool.get_device(dev.name)
+            assert spec_after is not None
+            self.assertEqual(spec_after.state, "available")
+            self.assertEqual(spec_after.owner, "")
+        finally:
+            lab.close()
 
     def test_cluster_acquisition_and_ttl_expiry(self) -> None:
         lab = Lab(db_path=":memory:", seed_demo=True)
-        with lab.acquire_cluster(
-            {
-                "master": {"board_type": "raspberry-pi-4"},
-                "dut": {"board_type": "ti-am62x"},
-            },
-            owner="cluster-job",
-        ) as cluster:
-            self.assertIn("master", cluster)
-            self.assertIn("dut", cluster)
-            self.assertEqual(cluster["dut"].board_type, "ti-am62x")
+        try:
+            with lab.acquire_cluster(
+                {
+                    "master": {"board_type": "raspberry-pi-4"},
+                    "dut": {"board_type": "ti-am62x"},
+                },
+                owner="cluster-job",
+            ) as cluster:
+                self.assertIn("master", cluster)
+                self.assertIn("dut", cluster)
+                self.assertEqual(cluster["dut"].board_type, "ti-am62x")
 
-        # Verify TTL expiration
-        spec, _ = lab.pool.reserve(name="rpi4-lab-01", owner="temp-user", ttl_seconds=-1.0)
-        self.assertEqual(lab.pool.expire_stale_reservations(), 1)
-        refreshed = lab.pool.get_device(spec.name)
-        assert refreshed is not None
-        self.assertEqual(refreshed.state, "available")
+            # Verify TTL expiration
+            spec, _ = lab.pool.reserve(name="rpi4-lab-01", owner="temp-user", ttl_seconds=-1.0)
+            self.assertEqual(lab.pool.expire_stale_reservations(), 1)
+            refreshed = lab.pool.get_device(spec.name)
+            assert refreshed is not None
+            self.assertEqual(refreshed.state, "available")
+        finally:
+            lab.close()
 
     def test_result_parser_junit_xml(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -318,6 +326,152 @@ class TestStep5WebServerCLIAndLegacy(unittest.TestCase):
             dm.submit_test_request(safe_load_yaml(job_file.read_text(encoding="utf-8")))
             xml_report = Path(dm.workspace) / "test_results" / "uname.xml"
             self.assertTrue(xml_report.exists())
+            dm.resource_pool.close()
+
+
+class TestTopologySSHAndContextReboot(unittest.TestCase):
+    """Tests for manual topology definition, SSH connection, and OS-aware SSH reboot."""
+
+    def test_manual_topology_device_creation_and_bidirectional_links(self) -> None:
+        lab = Lab(db_path=":memory:", seed_demo=False)
+        try:
+            rpi = lab.define_device(
+                name="rpi4-custom-01",
+                board_type="raspberry-pi-4",
+                ip_address="192.168.50.10",
+                ssh_user="pi",
+                ssh_port=2222,
+                identity_file="/home/pi/.ssh/id_ed25519",
+                os_hint="raspbian",
+                simulated=True,
+            )
+            self.assertEqual(rpi.subnet, "192.168.50.0/24")
+            self.assertEqual(rpi.transport_config["user"], "pi")
+            self.assertEqual(rpi.transport_config["port"], 2222)
+
+            ti = lab.define_device(
+                name="ti-evm-custom-01",
+                board_type="ti-am62x",
+                ip_address="192.168.50.20",
+                ssh_user="root",
+                os_hint="busybox",
+                connected_to=["rpi4-custom-01"],
+                simulated=True,
+            )
+            self.assertIn("rpi4-custom-01", ti.connected_to)
+            # Verify bidirectional link sync on rpi4-custom-01
+            rpi_reloaded = lab.pool.get_device("rpi4-custom-01")
+            assert rpi_reloaded is not None
+            self.assertIn("ti-evm-custom-01", rpi_reloaded.connected_to)
+
+            topo = lab.topology()
+            self.assertIn("192.168.50.0/24", topo["subnets"])
+            self.assertEqual(len(topo["links"]), 1)
+
+            # Unlink and re-link
+            lab.unlink_devices("rpi4-custom-01", "ti-evm-custom-01")
+            self.assertEqual(len(lab.topology()["links"]), 0)
+            lab.link_devices("rpi4-custom-01", "ti-evm-custom-01")
+            self.assertEqual(len(lab.topology()["links"]), 1)
+        finally:
+            lab.close()
+
+    def test_ssh_connection_and_os_context_aware_reboot(self) -> None:
+        # 1. Verify probe parsing & reboot command selection across OS contexts
+        debian_probe = (
+            "__DAMF_KERNEL__\nLinux\n__DAMF_ARCH__\naarch64\n"
+            "__DAMF_OS_RELEASE__\nID=debian\nPRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\n"
+            "__DAMF_INIT__\nsystemd\n"
+        )
+        os_deb = parse_os_probe_output(debian_probe)
+        self.assertEqual(os_deb["kernel"], "Linux")
+        self.assertEqual(os_deb["distro"], "debian")
+        self.assertEqual(os_deb["init_system"], "systemd")
+        self.assertEqual(
+            determine_reboot_command(os_deb, user="pi"),
+            "sudo -n systemctl reboot || sudo -n /sbin/reboot",
+        )
+        self.assertEqual(
+            determine_reboot_command(os_deb, user="root"),
+            "systemctl reboot || /sbin/reboot",
+        )
+
+        busybox_probe = (
+            "__DAMF_KERNEL__\nLinux\n__DAMF_ARCH__\narmv7l\n"
+            "__DAMF_OS_RELEASE__\nID=buildroot\nPRETTY_NAME=\"Buildroot 2026.02\"\n"
+            "__DAMF_INIT__\ninit\n__DAMF_REBOOT_BIN__\nlrwxrwxrwx 1 root root 14 /sbin/reboot -> ../bin/busybox\n"
+        )
+        os_bb = parse_os_probe_output(busybox_probe)
+        self.assertEqual(os_bb["init_system"], "busybox")
+        self.assertEqual(
+            determine_reboot_command(os_bb, user="root"),
+            "/sbin/reboot || reboot -f",
+        )
+
+        freebsd_probe = "__DAMF_KERNEL__\nFreeBSD\n__DAMF_ARCH__\narm64\n__DAMF_INIT__\ninit\n"
+        os_bsd = parse_os_probe_output(freebsd_probe)
+        self.assertEqual(os_bsd["kernel"], "FreeBSD")
+        self.assertEqual(
+            determine_reboot_command(os_bsd, user="admin"),
+            "sudo -n /sbin/shutdown -r now || sudo -n /sbin/reboot",
+        )
+
+        # 2. Verify end-to-end SSH connect & reboot via Lab, REST API, and CLI
+        lab = Lab(db_path=":memory:", seed_demo=True)
+        web_app = DAMFWebApp(lab=lab)
+        client = RemoteLabClient(app=web_app)
+        try:
+            created = client.add_device(
+                name="beagleplay-ssh-01",
+                board_type="ti-am62x",
+                ip_address="192.168.10.188",
+                ssh_user="debian",
+                ssh_port=22,
+                os_hint="debian",
+                connected_to=["rpi4-lab-01"],
+                simulated=True,
+            )
+            self.assertEqual(created["name"], "beagleplay-ssh-01")
+
+            conn_info = client.connect_ssh("beagleplay-ssh-01")
+            self.assertTrue(conn_info["connected"])
+            self.assertEqual(conn_info["os_info"]["init_system"], "systemd")
+            self.assertIn("ssh", conn_info["interactive_cmd"])
+
+            reb_info = client.reboot("beagleplay-ssh-01", via_ssh=True)
+            self.assertEqual(reb_info["returncode"], 0)
+            self.assertEqual(
+                reb_info["reboot_command"],
+                "sudo -n systemctl reboot || sudo -n /sbin/reboot",
+            )
+        finally:
+            lab.close()
+
+        # 3. Verify CLI `add-device`, `link`, `ssh`, and `reboot`
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_file = Path(tmpdir) / "topo.db"
+            self.assertEqual(
+                cli_main(
+                    [
+                        "--db",
+                        str(db_file),
+                        "add-device",
+                        "ti-busybox-board",
+                        "--ip",
+                        "192.168.10.77",
+                        "--type",
+                        "ti-am335x",
+                        "--user",
+                        "root",
+                        "--os",
+                        "busybox",
+                        "--simulated",
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(cli_main(["--db", str(db_file), "ssh", "ti-busybox-board"]), 0)
+            self.assertEqual(cli_main(["--db", str(db_file), "reboot", "ti-busybox-board"]), 0)
 
 
 if __name__ == "__main__":

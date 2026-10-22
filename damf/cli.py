@@ -37,6 +37,37 @@ def build_parser() -> argparse.ArgumentParser:
     p_dev.add_argument("--state", help="Filter by state (available, reserved, offline)")
     p_dev.add_argument("--json", action="store_true", help="Output JSON")
 
+    # damf add-device
+    p_add = sub.add_parser("add-device", help="Manually define/add a device in the lab topology")
+    p_add.add_argument("name", help="Unique device name (e.g. rpi4-bench-01)")
+    p_add.add_argument("--ip", dest="ip_address", default="", help="Target IP address")
+    p_add.add_argument("--type", dest="board_type", default="generic-linux", help="Board type (e.g. raspberry-pi-4, ti-am62x)")
+    p_add.add_argument("--arch", default="arm64", help="CPU architecture (default: arm64)")
+    p_add.add_argument("--subnet", help="Subnet CIDR (auto-inferred from IP if omitted)")
+    p_add.add_argument("--user", dest="ssh_user", default="root", help="SSH username (default: root)")
+    p_add.add_argument("--port", dest="ssh_port", type=int, default=22, help="SSH port (default: 22)")
+    p_add.add_argument("--key", dest="identity_file", help="Path to SSH private key")
+    p_add.add_argument("--os", dest="os_hint", help="Target OS hint (e.g. debian, busybox, poky, freebsd)")
+    p_add.add_argument("--connect-to", default="", help="Comma-separated peer device names in topology")
+    p_add.add_argument("--tags", default="", help="Comma-separated capability tags")
+    p_add.add_argument("--simulated", action="store_true", help="Enable simulated SSH mode for testing")
+
+    # damf link
+    p_link = sub.add_parser("link", help="Connect two devices in the lab topology")
+    p_link.add_argument("source", help="First device name")
+    p_link.add_argument("target", help="Second device name")
+
+    # damf ssh
+    p_ssh = sub.add_parser("ssh", help="Connect via SSH to a target device (or probe/run command)")
+    p_ssh.add_argument("name", help="Target device name")
+    p_ssh.add_argument("-c", "--command", help="Optional single command to execute over SSH")
+    p_ssh.add_argument("-i", "--interactive", action="store_true", help="Launch interactive system ssh session")
+
+    # damf reboot
+    p_reb = sub.add_parser("reboot", help="Reboot a target over SSH using OS-appropriate Linux/Unix reboot command")
+    p_reb.add_argument("name", help="Target device name")
+    p_reb.add_argument("--force-probe", action="store_true", help="Re-probe target OS before rebooting")
+
     # damf discover
     p_disc = sub.add_parser("discover", help="Scan network (ARP/mDNS/Subnet), Serial, and ADB for boards")
     p_disc.add_argument("--subnet", help="Optional subnet CIDR to probe (e.g. 192.168.1.0/24)")
@@ -104,6 +135,67 @@ def _dispatch_cli(parser: argparse.ArgumentParser, args: argparse.Namespace, lab
                     f"{(d.ip_address or '-'):<16} {d.transport:<10} {d.state:<10} {d.owner or '-'}"
                 )
         return 0
+
+    if args.subcommand == "add-device":
+        peers = [p.strip() for p in args.connect_to.split(",") if p.strip()]
+        tags = [t.strip() for t in args.tags.split(",") if t.strip()]
+        spec = lab.define_device(
+            name=args.name,
+            board_type=args.board_type,
+            ip_address=args.ip_address,
+            subnet=args.subnet,
+            arch=args.arch,
+            ssh_user=args.ssh_user,
+            ssh_port=args.ssh_port,
+            identity_file=args.identity_file,
+            os_hint=args.os_hint,
+            connected_to=peers,
+            tags=tags,
+            simulated=args.simulated,
+        )
+        print(
+            f"Defined device '{spec.name}' ({spec.board_type}, ip={spec.ip_address or 'N/A'}, "
+            f"subnet={spec.subnet}, peers={spec.connected_to})"
+        )
+        return 0
+
+    if args.subcommand == "link":
+        res = lab.link_devices(args.source, args.target)
+        print(f"Linked '{res['source']}' <-> '{res['target']}' in lab topology")
+        return 0
+
+    if args.subcommand == "ssh":
+        dev = lab.get_device(args.name)
+        if args.interactive:
+            import subprocess
+            from damf.transports import SSHTransport
+
+            ssh_t = dev.transport if isinstance(dev.transport, SSHTransport) else SSHTransport(dev.spec)
+            cmd_list = ssh_t.build_interactive_ssh_command()
+            return subprocess.call(cmd_list)
+        if args.command:
+            res = dev.run(args.command)
+            if res.stdout:
+                sys.stdout.write(res.stdout)
+            if res.stderr:
+                sys.stderr.write(res.stderr)
+            return res.returncode
+        info = lab.connect_ssh(args.name)
+        os_info = info.get("os_info", {})
+        print(f"Connected via SSH to {info['user']}@{info['host']}:{info['port']} ({info['device']})")
+        print(f"  Detected OS      : {os_info.get('pretty_name')} [kernel={os_info.get('kernel')}, init={os_info.get('init_system')}]")
+        print(f"  OS Reboot Command: {os_info.get('reboot_command')}")
+        print(f"  Interactive Shell: {info['interactive_cmd']}")
+        return 0
+
+    if args.subcommand == "reboot":
+        info = lab.reboot_device(args.name, via_ssh=True, force_os_probe=args.force_probe)
+        os_info = info.get("os_info", {})
+        print(
+            f"Rebooted '{info['device']}' over SSH "
+            f"[OS: {os_info.get('pretty_name', 'Unix')}] using command: {info['reboot_command']}"
+        )
+        return info["returncode"]
 
     if args.subcommand == "discover":
         found = lab.scan_and_register(

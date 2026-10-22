@@ -5,6 +5,7 @@ from damf.power.controllers import (
     IPMIPowerController,
     PowerController,
     SimulatedPowerController,
+    SSHPowerController,
     USBHubPowerController,
     WebhookPowerController,
     create_power_controller,
@@ -13,6 +14,7 @@ from damf.power.controllers import (
 __all__ = [
     "PowerController",
     "SimulatedPowerController",
+    "SSHPowerController",
     "WebhookPowerController",
     "USBHubPowerController",
     "IPMIPowerController",

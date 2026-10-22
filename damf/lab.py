@@ -80,8 +80,118 @@ class Lab:
         return lab
 
     def register_device(self, spec: DeviceSpec | dict[str, Any], overwrite: bool = True) -> DeviceSpec:
-        """Add or update a device in the lab pool."""
-        return self.pool.register_device(spec, overwrite=overwrite)
+        """Add or update a device in the lab pool and synchronize bidirectional topology links."""
+        registered = self.pool.register_device(spec, overwrite=overwrite)
+        for peer_name in registered.connected_to:
+            peer = self.pool.get_device(peer_name)
+            if peer is not None and registered.name not in peer.connected_to:
+                peer.connected_to.append(registered.name)
+                self.pool.register_device(peer, overwrite=True)
+        return registered
+
+    def define_device(
+        self,
+        name: str,
+        board_type: str = "generic-linux",
+        ip_address: str = "",
+        subnet: str | None = None,
+        arch: str = "arm64",
+        transport: str = "ssh",
+        ssh_user: str = "root",
+        ssh_port: int = 22,
+        identity_file: str | None = None,
+        password: str | None = None,
+        os_hint: str | None = None,
+        connected_to: list[str] | None = None,
+        tags: list[str] | None = None,
+        simulated: bool = False,
+        power_type: str = "ssh",
+    ) -> DeviceSpec:
+        """Manually define and register a device in the lab topology with SSH/connection settings."""
+        if not subnet:
+            subnet = ".".join(ip_address.split(".")[:3]) + ".0/24" if ip_address and "." in ip_address else "192.168.10.0/24"
+        t_cfg: dict[str, Any] = {
+            "user": ssh_user,
+            "port": int(ssh_port),
+            "simulated": bool(simulated),
+        }
+        if identity_file:
+            t_cfg["identity_file"] = identity_file
+        if password:
+            t_cfg["password"] = password
+        attrs: dict[str, Any] = {}
+        if os_hint:
+            attrs["os"] = os_hint
+
+        spec = DeviceSpec(
+            name=name,
+            board_type=board_type,
+            arch=arch,
+            ip_address=ip_address,
+            subnet=subnet,
+            transport=transport,
+            transport_config=t_cfg,
+            power_type=power_type if not simulated else "simulated",
+            power_state="on",
+            tags=list(tags or []),
+            attributes=attrs,
+            connected_to=list(connected_to or []),
+        )
+        return self.register_device(spec, overwrite=True)
+
+    def link_devices(self, device_a: str, device_b: str) -> dict[str, Any]:
+        """Create a bidirectional topology link between two devices in the lab."""
+        dev_a = self.pool.get_device(device_a)
+        dev_b = self.pool.get_device(device_b)
+        if dev_a is None:
+            from damf.exceptions import DeviceNotFoundError
+
+            raise DeviceNotFoundError(f"Device '{device_a}' not found")
+        if dev_b is None:
+            from damf.exceptions import DeviceNotFoundError
+
+            raise DeviceNotFoundError(f"Device '{device_b}' not found")
+        if device_b not in dev_a.connected_to:
+            dev_a.connected_to.append(device_b)
+            self.pool.register_device(dev_a, overwrite=True)
+        if device_a not in dev_b.connected_to:
+            dev_b.connected_to.append(device_a)
+            self.pool.register_device(dev_b, overwrite=True)
+        return {"source": device_a, "target": device_b, "linked": True}
+
+    def unlink_devices(self, device_a: str, device_b: str) -> dict[str, Any]:
+        """Remove a topology link between two devices in the lab."""
+        dev_a = self.pool.get_device(device_a)
+        dev_b = self.pool.get_device(device_b)
+        if dev_a is not None and device_b in dev_a.connected_to:
+            dev_a.connected_to = [p for p in dev_a.connected_to if p != device_b]
+            self.pool.register_device(dev_a, overwrite=True)
+        if dev_b is not None and device_a in dev_b.connected_to:
+            dev_b.connected_to = [p for p in dev_b.connected_to if p != device_a]
+            self.pool.register_device(dev_b, overwrite=True)
+        return {"source": device_a, "target": device_b, "linked": False}
+
+    def connect_ssh(self, name: str, verify_auth: bool = False) -> dict[str, Any]:
+        """Connect to `name` over SSH, detect its running OS, and persist metadata to the pool."""
+        dev = self.get_device(name)
+        info = dev.connect_ssh(verify_auth=verify_auth)
+        self.pool.register_device(dev.spec, overwrite=True)
+        return info
+
+    def reboot_device(self, name: str, via_ssh: bool = True, force_os_probe: bool = False) -> dict[str, Any]:
+        """Reboot `name` (by default over SSH using OS-appropriate Linux/Unix reboot command)."""
+        dev = self.get_device(name)
+        res = dev.reboot(via_ssh=via_ssh, force_os_probe=force_os_probe)
+        self.pool.register_device(dev.spec, overwrite=True)
+        return {
+            "device": dev.name,
+            "power_state": dev.power_state,
+            "os_info": dev.spec.attributes.get("os_info", {}),
+            "reboot_command": res.command,
+            "returncode": res.returncode,
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+        }
 
     def devices(
         self,
@@ -287,4 +397,28 @@ class RemoteLabClient:
             "POST",
             f"/api/v1/devices/{urllib.parse.quote(name)}/exec",
             {"command": command},
+        )
+
+    def add_device(self, **device_fields: Any) -> dict[str, Any]:
+        """Define/create a new device in the remote lab topology."""
+        return self._request("POST", "/api/v1/devices", device_fields)
+
+    def link_devices(self, source: str, target: str) -> dict[str, Any]:
+        """Create a topology link between two devices on the remote server."""
+        return self._request("POST", "/api/v1/topology/links", {"source": source, "target": target})
+
+    def connect_ssh(self, name: str, verify_auth: bool = False) -> dict[str, Any]:
+        """Connect via SSH to the specified target and detect its OS."""
+        return self._request(
+            "POST",
+            f"/api/v1/devices/{urllib.parse.quote(name)}/connect",
+            {"verify_auth": verify_auth},
+        )
+
+    def reboot(self, name: str, via_ssh: bool = True) -> dict[str, Any]:
+        """Trigger a context-aware Linux/Unix SSH reboot on the specified target."""
+        return self._request(
+            "POST",
+            f"/api/v1/devices/{urllib.parse.quote(name)}/reboot",
+            {"via_ssh": via_ssh},
         )

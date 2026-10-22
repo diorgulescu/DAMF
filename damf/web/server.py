@@ -24,6 +24,28 @@ class DAMFWebApp:
     def __init__(self, lab: Lab | None = None):
         self.lab = lab or Lab(seed_demo=True)
 
+    def _register_from_payload(self, payload: dict[str, Any]) -> DeviceSpec:
+        """Normalize a REST device creation/update payload and register it in the lab topology."""
+        if any(k in payload for k in ("ssh_user", "ssh_port", "identity_file", "password", "os_hint")):
+            return self.lab.define_device(
+                name=str(payload["name"]),
+                board_type=str(payload.get("board_type", "generic-linux")),
+                ip_address=str(payload.get("ip_address", "")),
+                subnet=payload.get("subnet"),
+                arch=str(payload.get("arch", "arm64")),
+                transport=str(payload.get("transport", "ssh")),
+                ssh_user=str(payload.get("ssh_user", "root")),
+                ssh_port=int(payload.get("ssh_port", 22)),
+                identity_file=payload.get("identity_file") or None,
+                password=payload.get("password") or None,
+                os_hint=payload.get("os_hint") or None,
+                connected_to=payload.get("connected_to") or [],
+                tags=payload.get("tags") or [],
+                simulated=bool(payload.get("simulated", False)),
+                power_type=str(payload.get("power_type", "ssh")),
+            )
+        return self.lab.register_device(payload, overwrite=True)
+
     def handle_request(
         self,
         method: str,
@@ -79,9 +101,21 @@ class DAMFWebApp:
                     }
                 )
 
-            # API v1: Topology
+            # API v1: Topology & Links
             if method == "GET" and path == "/api/v1/topology":
                 return json_resp(self.lab.topology())
+
+            if method == "POST" and path == "/api/v1/topology/devices":
+                spec = self._register_from_payload(payload)
+                return json_resp(spec.to_dict(), status=201)
+
+            if path == "/api/v1/topology/links":
+                src = str(payload.get("source", ""))
+                dst = str(payload.get("target", ""))
+                if method == "POST":
+                    return json_resp(self.lab.link_devices(src, dst), status=201)
+                if method == "DELETE":
+                    return json_resp(self.lab.unlink_devices(src, dst))
 
             # API v1: Settings
             if path == "/api/v1/settings":
@@ -132,7 +166,7 @@ class DAMFWebApp:
                     )
                     return json_resp({"devices": [d.to_dict() for d in devs]})
                 if method == "POST":
-                    spec = self.lab.register_device(payload, overwrite=True)
+                    spec = self._register_from_payload(payload)
                     return json_resp(spec.to_dict(), status=201)
 
             # API v1: Single device & sub-actions
@@ -184,15 +218,27 @@ class DAMFWebApp:
                     spec = self.lab.pool.get_device(dev_name)
                     return json_resp({"released": dev_name, "device": spec.to_dict() if spec else None})
 
+                elif action == "connect" and method == "POST":
+                    verify_auth = bool(payload.get("verify_auth", False))
+                    info = self.lab.connect_ssh(dev_name, verify_auth=verify_auth)
+                    return json_resp(info)
+
+                elif action == "reboot" and method == "POST":
+                    via_ssh = bool(payload.get("via_ssh", True))
+                    force_os = bool(payload.get("force_os_probe", False))
+                    info = self.lab.reboot_device(dev_name, via_ssh=via_ssh, force_os_probe=force_os)
+                    return json_resp(info)
+
                 elif action == "power" and method == "POST":
                     dev = self.lab.get_device(dev_name)
                     pwr_action = str(payload.get("action", "on")).lower()
+                    if pwr_action in ("reboot", "reset", "cycle"):
+                        info = self.lab.reboot_device(dev_name, via_ssh=bool(payload.get("via_ssh", True)))
+                        return json_resp(info)
                     if pwr_action == "on":
                         dev.power_on()
                     elif pwr_action == "off":
                         dev.power_off()
-                    elif pwr_action in ("reboot", "reset", "cycle"):
-                        dev.reboot(delay_sec=0.05)
                     self.lab.register_device(dev.spec, overwrite=True)
                     return json_resp({"device": dev.name, "power_state": dev.power_state})
 
