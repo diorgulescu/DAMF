@@ -10,7 +10,15 @@ from typing import Any, Callable
 from damf.exceptions import TransportError
 from damf.models import CommandResult, DeviceSpec, TestCaseResult, TestSuiteResult
 from damf.power import PowerController, create_power_controller
-from damf.transports import SerialTransport, Transport, create_transport
+from damf.transports import (
+    SerialTransport,
+    SSHTransport,
+    Transport,
+    create_transport,
+    determine_reboot_command,
+    device_supports_serial,
+    parse_os_probe_output,
+)
 
 
 class Device:
@@ -57,11 +65,74 @@ class Device:
     def power_state(self) -> str:
         return self.spec.power_state
 
+    @property
+    def supports_serial(self) -> bool:
+        """Return True if this device is configured for or supports UART/Serial console access."""
+        return device_supports_serial(self.spec)
+
     # Lifecycle & Context Manager
     def connect(self) -> "Device":
         """Connect to the target over its configured transport."""
         self.transport.connect()
         return self
+
+    def connect_ssh(self, verify_auth: bool = False) -> dict[str, Any]:
+        """Connect to the target over SSH, detect its running OS, and return connection details."""
+        ssh = self.transport if isinstance(self.transport, SSHTransport) else SSHTransport(self.spec)
+        ssh.connect(verify_auth=verify_auth)
+        self.transport.connected = True
+        os_info = ssh.detect_os(force_refresh=True)
+        return {
+            "device": self.name,
+            "connected": True,
+            "host": ssh.host,
+            "port": ssh.port,
+            "user": ssh.user,
+            "ssh_banner": self.spec.attributes.get("ssh_banner", ""),
+            "os_info": os_info,
+            "interactive_cmd": " ".join(ssh.build_interactive_ssh_command()),
+        }
+
+    def connect_serial(self, auto_login: bool = True) -> dict[str, Any]:
+        """Connect to the target over UART/Serial console and return port/prompt state."""
+        if not self.supports_serial:
+            raise TransportError(f"Device '{self.name}' does not support serial connections")
+        ser = self.transport if isinstance(self.transport, SerialTransport) else SerialTransport(self.spec)
+        ser.connect()
+        if isinstance(self.transport, SerialTransport):
+            self.transport.connected = True
+        info = ser.detect_console_state(auto_login=auto_login)
+        if info.get("console_state") == "shell":
+            info["os_info"] = self.detect_os()
+        return info
+
+    def run_serial(self, command: str, timeout: float = 30.0) -> CommandResult:
+        """Execute a command specifically over the UART/Serial console."""
+        if not self.supports_serial:
+            raise TransportError(f"Device '{self.name}' does not support serial connections")
+        ser = self.transport if isinstance(self.transport, SerialTransport) else SerialTransport(self.spec)
+        return ser.run(command, timeout=timeout)
+
+    def detect_os(self, force_refresh: bool = False) -> dict[str, str]:
+        """Detect the OS, distribution, and init system running on the target."""
+        if isinstance(self.transport, SSHTransport):
+            return self.transport.detect_os(force_refresh=force_refresh)
+        if not force_refresh and isinstance(self.spec.attributes.get("os_info"), dict):
+            return dict(self.spec.attributes["os_info"])
+
+        probe_script = (
+            "echo __DAMF_KERNEL__; uname -s 2>/dev/null || true; "
+            "echo __DAMF_ARCH__; uname -m 2>/dev/null || true; "
+            "echo __DAMF_OS_RELEASE__; cat /etc/os-release 2>/dev/null || true; "
+            "echo __DAMF_INIT__; ps -p 1 -o comm= 2>/dev/null || true"
+        )
+        res = self.run(probe_script, timeout=10.0)
+        fallback = f"{self.spec.attributes.get('os', '')} {self.spec.deployed_image} {self.spec.board_type}".strip()
+        os_info = parse_os_probe_output(res.stdout if res.ok else "", fallback_hint=fallback)
+        user = str(self.spec.transport_config.get("user", "root"))
+        os_info["reboot_command"] = determine_reboot_command(os_info, user=user)
+        self.spec.attributes["os_info"] = os_info
+        return os_info
 
     def disconnect(self) -> None:
         """Close the transport connection."""
@@ -92,10 +163,36 @@ class Device:
         self.logger.info("Powering off %s", self.name)
         self.power.power_off()
 
-    def reboot(self, delay_sec: float = 0.2) -> None:
-        """Power cycle the device."""
+    def reboot(
+        self,
+        delay_sec: float = 0.2,
+        via_ssh: bool | None = None,
+        force_os_probe: bool = False,
+    ) -> CommandResult:
+        """Reboot the device.
+
+        By default, for SSH-capable targets (or when `via_ssh=True`), detects the running
+        Linux/Unix OS over SSH and issues the appropriate OS-specific reboot command.
+        """
         self.logger.info("Rebooting %s", self.name)
+        use_ssh = via_ssh if via_ssh is not None else (
+            isinstance(self.transport, SSHTransport)
+            or self.spec.power_type == "ssh"
+            or (bool(self.spec.ip_address) and self.spec.transport in ("ssh", "serial"))
+        )
+        if use_ssh:
+            ssh = self.transport if isinstance(self.transport, SSHTransport) else SSHTransport(self.spec)
+            res = ssh.reboot_over_ssh(force_os_probe=force_os_probe)
+            self.spec.power_state = "on"
+            return res
+
         self.power.reboot(delay_sec=delay_sec)
+        return CommandResult(
+            command="power_controller.reboot",
+            returncode=0,
+            stdout=f"Power cycled {self.name}\n",
+            device_name=self.name,
+        )
 
     def reset(self) -> None:
         """Alias for reboot()."""
@@ -185,6 +282,348 @@ class Device:
                 )
             )
         return suite
+
+    def deploy_agent(
+        self,
+        server_url: str = "http://127.0.0.1:8080",
+        interval: int = 15,
+        prefer_shell: bool = False,
+    ) -> dict[str, Any]:
+        """Deploy and start the DAMF heartbeat/telemetry agent on this target over SSH/transport.
+
+        Automatically chooses Tier-1 (`damf/agent.py` stdlib Python) when `python3` is present on
+        the target, or falls back to Tier-2 (`damf-agent.sh` POSIX/BusyBox shell script).
+        """
+        from damf.agent import collect_telemetry, generate_posix_shell_agent
+        import tempfile
+
+        self.connect()
+        has_python3 = False
+        if not prefer_shell:
+            if self.spec.transport_config.get("simulated", False):
+                has_python3 = "busybox" not in str(self.spec.attributes.get("os", "")).lower()
+            else:
+                probe = self.run("command -v python3 >/dev/null 2>&1 && echo PY3_OK || echo NO_PY3", timeout=10.0)
+                has_python3 = "PY3_OK" in probe.stdout
+
+        if has_python3:
+            tier = "python"
+            remote_script = "/tmp/damf_agent.py"
+            local_agent = Path(__file__).parent / "agent.py"
+            self.upload(local_agent, remote_script)
+            start_cmd = (
+                f"chmod +x {remote_script}; "
+                f"nohup python3 {remote_script} --server {server_url} --name {self.name} "
+                f"--interval {int(interval)} >/tmp/damf-agent.log 2>&1 &"
+            )
+            self.run(start_cmd, timeout=10.0)
+        else:
+            tier = "posix-sh"
+            remote_script = "/tmp/damf_agent.sh"
+            sh_content = generate_posix_shell_agent(server_url=server_url, device_name=self.name, interval=interval)
+            with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False, encoding="utf-8") as tmp:
+                tmp.write(sh_content)
+                tmp_path = Path(tmp.name)
+            try:
+                self.upload(tmp_path, remote_script)
+            finally:
+                tmp_path.unlink(missing_ok=True)
+            start_cmd = f"chmod +x {remote_script}; nohup sh {remote_script} >/tmp/damf-agent.log 2>&1 &"
+            self.run(start_cmd, timeout=10.0)
+
+        self.spec.attributes["agent_active"] = True
+        self.spec.attributes["agent_tier"] = tier
+        self.spec.attributes["agent_server_url"] = server_url
+        if "telemetry" not in self.spec.attributes:
+            snap = collect_telemetry(device_name=self.name, board_type=self.board_type)
+            self.spec.attributes["telemetry"] = snap
+        self.spec.last_seen = time.time()
+        return {
+            "device": self.name,
+            "deployed": True,
+            "agent_tier": tier,
+            "remote_script": remote_script,
+            "interval": int(interval),
+            "server_url": server_url,
+        }
+
+    def fetch_telemetry(self, refresh: bool = False, log_lines: int = 25) -> dict[str, Any]:
+        """Return vital telemetry and system logs (from latest agent heartbeat or live SSH query)."""
+        from damf.agent import collect_telemetry
+
+        cached = self.spec.attributes.get("telemetry")
+        if cached and not refresh:
+            age = round(max(0.0, time.time() - float(cached.get("heartbeat_at", self.spec.last_seen or time.time()))), 1)
+            return {
+                "device": self.name,
+                "agent_active": bool(self.spec.attributes.get("agent_active", False)),
+                "agent_tier": self.spec.attributes.get("agent_tier", "python"),
+                "heartbeat_age_sec": age,
+                **cached,
+            }
+
+        if self.spec.transport_config.get("simulated", False):
+            snap = collect_telemetry(device_name=self.name, board_type=self.board_type, log_lines=log_lines)
+        else:
+            cmd = (
+                "awk '{print $1, $2, $3}' /proc/loadavg 2>/dev/null || echo '0.1 0.1 0.1'; "
+                "echo __DAMF_LOGS__; "
+                f"(dmesg 2>/dev/null | tail -n {int(log_lines)}) || echo 'no logs'"
+            )
+            res = self.run(cmd, timeout=10.0)
+            parts = res.stdout.split("__DAMF_LOGS__")
+            loads = parts[0].strip().split() if parts and parts[0].strip() else ["0.0", "0.0", "0.0"]
+            logs = parts[1].strip().splitlines() if len(parts) > 1 else []
+            snap = collect_telemetry(device_name=self.name, board_type=self.board_type, log_lines=log_lines)
+            try:
+                snap["load_1m"] = float(loads[0])
+                snap["load_5m"] = float(loads[1])
+                snap["load_15m"] = float(loads[2])
+            except (ValueError, IndexError):
+                pass
+            if logs:
+                snap["logs"] = logs
+
+        snap["heartbeat_at"] = time.time()
+        self.spec.attributes["telemetry"] = snap
+        self.spec.last_seen = snap["heartbeat_at"]
+        return {
+            "device": self.name,
+            "agent_active": bool(self.spec.attributes.get("agent_active", False)),
+            "agent_tier": self.spec.attributes.get("agent_tier", "ssh-live"),
+            "heartbeat_age_sec": 0.0,
+            **snap,
+        }
+
+    def copy_system_logs(
+        self,
+        output_dir: str | Path | None = None,
+        max_lines: int = 200,
+        remote_files: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Copy system and kernel logs on demand from the target to the host.
+
+        Collects `dmesg`, `journalctl`, `/var/log/syslog`, `/var/log/messages` (or `logcat`
+        on Android targets), optionally copies explicit `remote_files` via SCP/ADB/Serial,
+        and writes a consolidated log bundle file when `output_dir` is specified.
+        """
+        now = time.time()
+        ts_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(now))
+        sources: dict[str, str] = {}
+        copied_files: list[str] = []
+
+        if self.spec.transport_config.get("simulated", False):
+            tel_logs = (self.spec.attributes.get("telemetry") or {}).get("logs") or [
+                f"[00:00:01] kernel: Linux version 6.6.20 on {self.name} ({self.arch})",
+                f"[00:00:03] systemd[1]: Reached target Multi-User System on {self.name}.",
+            ]
+            sources["dmesg"] = "\n".join(tel_logs)
+            if self.spec.transport == "adb":
+                sources["logcat"] = f"I/ActivityManager: Simulated Android logcat on {self.name}"
+            else:
+                sources["syslog"] = (
+                    f"{time.strftime('%b %d %H:%M:%S')} {self.name} kernel: eth0 link up\n"
+                    f"{time.strftime('%b %d %H:%M:%S')} {self.name} sshd: Accepted key for "
+                    f"{self.spec.transport_config.get('user', 'root')}"
+                )
+        elif self.spec.transport == "adb":
+            lc = self.run(f"logcat -d -t {int(max_lines)}", timeout=15.0)
+            dm = self.run(f"dmesg | tail -n {int(max_lines)}", timeout=15.0)
+            if lc.stdout.strip():
+                sources["logcat"] = lc.stdout.strip()
+            if dm.stdout.strip():
+                sources["dmesg"] = dm.stdout.strip()
+        else:
+            os_info = self.detect_os()
+            sudo = "" if str(self.spec.transport_config.get("user", "root")) == "root" else "sudo -n "
+            collect_script = (
+                f"echo __DAMF_SRC_DMESG__; ({sudo}dmesg 2>/dev/null || dmesg 2>/dev/null) | tail -n {int(max_lines)}; "
+                f"echo __DAMF_SRC_SYSLOG__; ({sudo}tail -n {int(max_lines)} /var/log/syslog /var/log/messages 2>/dev/null || true); "
+                f"echo __DAMF_SRC_JOURNAL__; ({sudo}journalctl -n {int(max_lines)} --no-pager 2>/dev/null || true); "
+                f"echo __DAMF_SRC_AGENT__; (tail -n {int(max_lines)} /tmp/damf-agent.log 2>/dev/null || true)"
+            )
+            res = self.run(collect_script, timeout=20.0)
+            current = ""
+            buf: list[str] = []
+            marker_map = {
+                "__DAMF_SRC_DMESG__": "dmesg",
+                "__DAMF_SRC_SYSLOG__": "syslog",
+                "__DAMF_SRC_JOURNAL__": "journalctl",
+                "__DAMF_SRC_AGENT__": "damf_agent",
+            }
+            for line in res.stdout.splitlines():
+                stripped = line.strip()
+                if stripped in marker_map:
+                    if current and "\n".join(buf).strip():
+                        sources[current] = "\n".join(buf).strip()
+                    current = marker_map[stripped]
+                    buf = []
+                else:
+                    buf.append(line)
+            if current and "\n".join(buf).strip():
+                sources[current] = "\n".join(buf).strip()
+            sources.setdefault("os_summary", f"OS: {os_info.get('pretty_name', 'Unknown')}")
+
+        # Build combined formatted log bundle text
+        sections_text: list[str] = [
+            f"# DAMF System Log Bundle — Device: {self.name} ({self.board_type})",
+            f"# Collected At: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}",
+            "",
+        ]
+        for src_name, content in sources.items():
+            sections_text.append(f"==================== [{src_name.upper()}] ====================")
+            sections_text.append(content)
+            sections_text.append("")
+        combined_text = "\n".join(sections_text)
+
+        saved_path_str = ""
+        if output_dir is not None:
+            out_dir = Path(output_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            bundle_file = out_dir / f"{self.name}_system_logs_{ts_str}.log"
+            bundle_file.write_text(combined_text, encoding="utf-8")
+            saved_path_str = str(bundle_file)
+            copied_files.append(saved_path_str)
+
+            for rfile in remote_files or []:
+                local_target = out_dir / f"{self.name}_{Path(rfile).name}"
+                if self.spec.transport_config.get("simulated", False):
+                    local_target.write_text(f"# Simulated copy of {rfile} from {self.name}\n{combined_text}", encoding="utf-8")
+                else:
+                    self.download(rfile, local_target)
+                copied_files.append(str(local_target))
+
+        result = {
+            "device": self.name,
+            "collected_at": now,
+            "sources": sources,
+            "combined_text": combined_text,
+            "saved_path": saved_path_str,
+            "copied_files": copied_files,
+        }
+        self.spec.attributes["last_collected_logs"] = result
+        return result
+
+    def deploy_content(
+        self,
+        remote_path: str,
+        local_path: str | Path | None = None,
+        content: str | None = None,
+        filename: str | None = None,
+        structure: dict[str, str] | None = None,
+        extract_archive: bool = True,
+        chmod: str | None = None,
+        post_deploy_cmd: str | None = None,
+    ) -> dict[str, Any]:
+        """Deploy a file, directory tree, archive (.tar.gz/.tgz/.tar/.zip), inline text content,
+        or declarative folder `structure` dictionary onto this target device.
+        """
+        import shlex
+        import tempfile
+        from damf.exceptions import ConfigurationError
+
+        self.connect()
+        now = time.time()
+        deployed_items: list[str] = []
+        mode_used = ""
+
+        # 1. Declarative folder structure dictionary: {"bin/run.sh": "#!/bin/sh\n...", "etc/app.conf": "..."}
+        if structure:
+            mode_used = "structure"
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir) / "payload"
+                root.mkdir(parents=True, exist_ok=True)
+                for rel_file, file_body in structure.items():
+                    clean_rel = rel_file.lstrip("/")
+                    target_f = root / clean_rel
+                    target_f.parent.mkdir(parents=True, exist_ok=True)
+                    target_f.write_text(str(file_body), encoding="utf-8")
+                    deployed_items.append(f"{remote_path.rstrip('/')}/{clean_rel}")
+                self.run(f"mkdir -p {shlex.quote(remote_path)}", timeout=10.0)
+                self.upload(root, remote_path)
+
+        # 2. Inline text / script content
+        elif content is not None:
+            mode_used = "inline_content"
+            target_remote = f"{remote_path.rstrip('/')}/{filename}" if filename else remote_path
+            parent_remote = str(Path(target_remote).parent)
+            with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as tmp:
+                tmp.write(content)
+                tmp_path = Path(tmp.name)
+            try:
+                if parent_remote and parent_remote != ".":
+                    self.run(f"mkdir -p {shlex.quote(parent_remote)}", timeout=10.0)
+                self.upload(tmp_path, target_remote)
+                deployed_items.append(target_remote)
+            finally:
+                tmp_path.unlink(missing_ok=True)
+
+        # 3. Local file, directory, or archive (.tar.gz, .tgz, .tar, .zip)
+        elif local_path is not None:
+            src = Path(local_path)
+            if not src.exists():
+                raise ConfigurationError(f"Deployment source path does not exist: {src}")
+
+            low_name = src.name.lower()
+            is_archive = src.is_file() and (
+                low_name.endswith((".tar.gz", ".tgz", ".tar", ".zip"))
+            )
+            if is_archive and extract_archive:
+                mode_used = "archive_extract"
+                remote_tmp_archive = f"/tmp/damf_deploy_{src.name}"
+                self.run(f"mkdir -p {shlex.quote(remote_path)}", timeout=10.0)
+                self.upload(src, remote_tmp_archive)
+                if low_name.endswith((".tar.gz", ".tgz")):
+                    ext_cmd = f"tar -xzf {shlex.quote(remote_tmp_archive)} -C {shlex.quote(remote_path)} && rm -f {shlex.quote(remote_tmp_archive)}"
+                elif low_name.endswith(".tar"):
+                    ext_cmd = f"tar -xf {shlex.quote(remote_tmp_archive)} -C {shlex.quote(remote_path)} && rm -f {shlex.quote(remote_tmp_archive)}"
+                else:
+                    ext_cmd = f"unzip -o {shlex.quote(remote_tmp_archive)} -d {shlex.quote(remote_path)} && rm -f {shlex.quote(remote_tmp_archive)}"
+                self.run(ext_cmd, timeout=30.0)
+                deployed_items.append(f"{remote_path} (extracted from {src.name})")
+            elif src.is_dir():
+                mode_used = "directory"
+                self.run(f"mkdir -p {shlex.quote(remote_path)}", timeout=10.0)
+                self.upload(src, remote_path)
+                deployed_items.append(remote_path)
+            else:
+                mode_used = "file"
+                target_remote = (
+                    f"{remote_path.rstrip('/')}/{filename or src.name}"
+                    if remote_path.endswith("/") or filename
+                    else remote_path
+                )
+                parent_remote = str(Path(target_remote).parent)
+                if parent_remote and parent_remote != ".":
+                    self.run(f"mkdir -p {shlex.quote(parent_remote)}", timeout=10.0)
+                self.upload(src, target_remote)
+                deployed_items.append(target_remote)
+        else:
+            raise ConfigurationError(
+                "deploy_content requires one of: `local_path`, `content`, or `structure`"
+            )
+
+        if chmod:
+            self.run(f"chmod -R {shlex.quote(str(chmod))} {shlex.quote(remote_path)}", timeout=10.0)
+
+        post_output = ""
+        if post_deploy_cmd:
+            res = self.run(post_deploy_cmd, cwd=remote_path if mode_used != "file" else None, timeout=60.0)
+            post_output = res.stdout + (res.stderr or "")
+
+        summary = {
+            "device": self.name,
+            "ok": True,
+            "mode": mode_used,
+            "remote_path": remote_path,
+            "deployed_items": deployed_items,
+            "chmod": chmod or "",
+            "post_deploy_cmd": post_deploy_cmd or "",
+            "post_deploy_output": post_output.strip(),
+            "deployed_at": now,
+        }
+        self.spec.attributes["last_deployment"] = summary
+        return summary
 
     def __repr__(self) -> str:
         return (

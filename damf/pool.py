@@ -396,6 +396,74 @@ class ResourcePool:
             for r in rows
         ]
 
+    # Target Agent Heartbeat & Telemetry
+    def record_heartbeat(self, payload: dict[str, Any]) -> DeviceSpec:
+        """Record a push heartbeat from a target agent and update vital telemetry."""
+        dev_name = str(payload.get("device_name") or payload.get("name") or "").strip()
+        if not dev_name:
+            from damf.exceptions import ConfigurationError
+
+            raise ConfigurationError("Heartbeat payload must include 'device_name'")
+
+        now = time.time()
+        with self._lock, self._conn:
+            spec = self._get_device_raw(dev_name)
+            if spec is None:
+                ip_addr = str(payload.get("ip_address", ""))
+                subnet = ".".join(ip_addr.split(".")[:3]) + ".0/24" if ip_addr and "." in ip_addr else "192.168.10.0/24"
+                spec = DeviceSpec(
+                    name=dev_name,
+                    board_type=str(payload.get("board_type") or "generic-linux"),
+                    arch=str(payload.get("arch") or "arm64"),
+                    ip_address=ip_addr,
+                    subnet=subnet,
+                    state=DeviceState.AVAILABLE.value,
+                    power_state="on",
+                    tags=["agent-discovered"],
+                )
+
+            telemetry = {
+                "load_1m": float(payload.get("load_1m", 0.0)),
+                "load_5m": float(payload.get("load_5m", 0.0)),
+                "load_15m": float(payload.get("load_15m", 0.0)),
+                "mem_total_mb": float(payload.get("mem_total_mb", 0.0)),
+                "mem_used_mb": float(payload.get("mem_used_mb", 0.0)),
+                "mem_percent": float(payload.get("mem_percent", 0.0)),
+                "disk_total_gb": float(payload.get("disk_total_gb", 0.0)),
+                "disk_used_gb": float(payload.get("disk_used_gb", 0.0)),
+                "disk_percent": float(payload.get("disk_percent", 0.0)),
+                "cpu_temp_c": payload.get("cpu_temp_c"),
+                "uptime_seconds": float(payload.get("uptime_seconds", 0.0)),
+                "kernel": str(payload.get("kernel", "")),
+                "logs": list(payload.get("logs", []))[-50:],
+                "heartbeat_at": now,
+            }
+            spec.attributes["telemetry"] = telemetry
+            spec.attributes["agent_active"] = True
+            spec.last_seen = now
+            spec.power_state = "on"
+            if spec.state == DeviceState.OFFLINE.value:
+                spec.state = DeviceState.RESERVED.value if spec.reservation_id else DeviceState.AVAILABLE.value
+            if payload.get("ip_address") and not spec.ip_address:
+                spec.ip_address = str(payload["ip_address"])
+            return self.register_device(spec, overwrite=True)
+
+    def mark_stale_agents_offline(self, timeout_seconds: float = 45.0) -> list[str]:
+        """Mark agent-monitored devices as offline if no heartbeat arrived within `timeout_seconds`."""
+        now = time.time()
+        marked_offline: list[str] = []
+        with self._lock, self._conn:
+            for spec in self.list_devices():
+                if not spec.attributes.get("agent_active"):
+                    continue
+                if spec.last_seen and (now - spec.last_seen) > float(timeout_seconds):
+                    if spec.state != DeviceState.OFFLINE.value:
+                        spec.state = DeviceState.OFFLINE.value
+                        spec.power_state = "off"
+                        self.register_device(spec, overwrite=True)
+                        marked_offline.append(spec.name)
+        return marked_offline
+
     # Test Jobs History
     def record_test_job(
         self,
@@ -580,14 +648,14 @@ class ResourcePool:
                 mac_address="DC:A6:32:1A:2B:01",
                 subnet="192.168.10.0/24",
                 transport="ssh",
-                transport_config={"user": "root", "simulated": True},
+                transport_config={"user": "root", "serial_port": "/dev/ttyUSB1", "baudrate": 115200, "simulated": True},
                 power_type="simulated",
                 bootloader="u-boot",
                 cpu="Broadcom BCM2711 Cortex-A72",
                 deployed_image="Raspbian Bookworm 64-bit",
                 state=DeviceState.AVAILABLE.value,
                 power_state="on",
-                tags=["gpio", "i2c", "spi", "raspberry-pi", "hil-rack-1"],
+                tags=["gpio", "i2c", "spi", "uart", "raspberry-pi", "hil-rack-1"],
                 connected_to=["ti-am62x-evm-01"],
             ),
             DeviceSpec(
@@ -642,14 +710,14 @@ class ResourcePool:
                 mac_address="04:A3:16:90:12:4F",
                 subnet="192.168.20.0/24",
                 transport="ssh",
-                transport_config={"user": "debian", "simulated": True},
+                transport_config={"user": "debian", "serial_port": "/dev/ttyACM0", "baudrate": 115200, "simulated": True},
                 power_type="simulated",
                 bootloader="u-boot",
                 cpu="TI Sitara AM3358 Cortex-A8",
                 deployed_image="Debian 12 IoT",
                 state=DeviceState.AVAILABLE.value,
                 power_state="off",
-                tags=["ti", "pru", "gpio", "hil-rack-2"],
+                tags=["ti", "pru", "gpio", "serial", "hil-rack-2"],
                 connected_to=["ti-am62x-evm-01"],
             ),
             DeviceSpec(
@@ -672,5 +740,27 @@ class ResourcePool:
             ),
         ]
         for spec in demo_specs:
+            if spec.power_state == "on":
+                spec.attributes["agent_active"] = True
+                spec.attributes["telemetry"] = {
+                    "load_1m": 0.24,
+                    "load_5m": 0.18,
+                    "load_15m": 0.12,
+                    "mem_total_mb": 4096.0,
+                    "mem_used_mb": 612.5,
+                    "mem_percent": 15.0,
+                    "disk_total_gb": 32.0,
+                    "disk_used_gb": 5.4,
+                    "disk_percent": 16.9,
+                    "cpu_temp_c": 44.5,
+                    "uptime_seconds": 86420.0,
+                    "kernel": "Linux 6.6.20-rpt-rpi-v8",
+                    "logs": [
+                        "[00:00:01] kernel: Booting Linux on physical CPU 0x0",
+                        f"[00:00:04] systemd[1]: Started damf-agent.service on {spec.name}",
+                        f"[00:01:15] damf-agent: Heartbeat OK for {spec.name} ({spec.ip_address})",
+                    ],
+                    "heartbeat_at": time.time(),
+                }
             self.register_device(spec)
         return self.list_devices()

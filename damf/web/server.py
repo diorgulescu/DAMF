@@ -24,6 +24,33 @@ class DAMFWebApp:
     def __init__(self, lab: Lab | None = None):
         self.lab = lab or Lab(seed_demo=True)
 
+    def _register_from_payload(self, payload: dict[str, Any]) -> DeviceSpec:
+        """Normalize a REST device creation/update payload and register it in the lab topology."""
+        if any(
+            k in payload
+            for k in ("ssh_user", "ssh_port", "identity_file", "password", "os_hint", "serial_port", "baudrate")
+        ):
+            return self.lab.define_device(
+                name=str(payload["name"]),
+                board_type=str(payload.get("board_type", "generic-linux")),
+                ip_address=str(payload.get("ip_address", "")),
+                subnet=payload.get("subnet"),
+                arch=str(payload.get("arch", "arm64")),
+                transport=str(payload.get("transport", "ssh")),
+                ssh_user=str(payload.get("ssh_user", "root")),
+                ssh_port=int(payload.get("ssh_port", 22)),
+                identity_file=payload.get("identity_file") or None,
+                password=payload.get("password") or None,
+                os_hint=payload.get("os_hint") or None,
+                connected_to=payload.get("connected_to") or [],
+                tags=payload.get("tags") or [],
+                simulated=bool(payload.get("simulated", False)),
+                power_type=str(payload.get("power_type", "ssh")),
+                serial_port=payload.get("serial_port") or None,
+                baudrate=int(payload.get("baudrate") or 115200),
+            )
+        return self.lab.register_device(payload, overwrite=True)
+
     def handle_request(
         self,
         method: str,
@@ -79,9 +106,38 @@ class DAMFWebApp:
                     }
                 )
 
-            # API v1: Topology
+            # API v1: Agent Heartbeat & Health Check
+            if method == "POST" and path == "/api/v1/agent/heartbeat":
+                spec = self.lab.record_heartbeat(payload)
+                return json_resp(
+                    {
+                        "ack": True,
+                        "device": spec.name,
+                        "state": spec.state,
+                        "last_seen": spec.last_seen,
+                    }
+                )
+
+            if method == "POST" and path == "/api/v1/agent/check-health":
+                timeout_sec = float(payload.get("timeout_seconds", 45.0))
+                marked = self.lab.check_agent_health(timeout_seconds=timeout_sec)
+                return json_resp({"marked_offline": marked})
+
+            # API v1: Topology & Links
             if method == "GET" and path == "/api/v1/topology":
                 return json_resp(self.lab.topology())
+
+            if method == "POST" and path == "/api/v1/topology/devices":
+                spec = self._register_from_payload(payload)
+                return json_resp(spec.to_dict(), status=201)
+
+            if path == "/api/v1/topology/links":
+                src = str(payload.get("source", ""))
+                dst = str(payload.get("target", ""))
+                if method == "POST":
+                    return json_resp(self.lab.link_devices(src, dst), status=201)
+                if method == "DELETE":
+                    return json_resp(self.lab.unlink_devices(src, dst))
 
             # API v1: Settings
             if path == "/api/v1/settings":
@@ -89,6 +145,25 @@ class DAMFWebApp:
                     return json_resp(self.lab.pool.get_settings())
                 if method in ("POST", "PUT"):
                     return json_resp(self.lab.pool.update_settings(payload))
+
+            # API v1: Fleet / Lab-Wide Content Deployment
+            if method == "POST" and path == "/api/v1/deploy":
+                report = self.lab.deploy_to_lab(
+                    remote_path=str(payload.get("remote_path", "/tmp/damf_deploy")),
+                    local_path=payload.get("local_path") or None,
+                    content=payload.get("content"),
+                    filename=payload.get("filename") or None,
+                    structure=payload.get("structure") if isinstance(payload.get("structure"), dict) else None,
+                    extract_archive=bool(payload.get("extract_archive", True)),
+                    chmod=payload.get("chmod") or None,
+                    post_deploy_cmd=payload.get("post_deploy_cmd") or None,
+                    target_names=payload.get("target_names") or None,
+                    board_type=payload.get("board_type") or None,
+                    arch=payload.get("arch") or None,
+                    tags=payload.get("tags") or None,
+                    include_offline=bool(payload.get("include_offline", False)),
+                )
+                return json_resp(report)
 
             # API v1: Discovery
             if method == "POST" and path == "/api/v1/discover":
@@ -132,7 +207,7 @@ class DAMFWebApp:
                     )
                     return json_resp({"devices": [d.to_dict() for d in devs]})
                 if method == "POST":
-                    spec = self.lab.register_device(payload, overwrite=True)
+                    spec = self._register_from_payload(payload)
                     return json_resp(spec.to_dict(), status=201)
 
             # API v1: Single device & sub-actions
@@ -184,15 +259,86 @@ class DAMFWebApp:
                     spec = self.lab.pool.get_device(dev_name)
                     return json_resp({"released": dev_name, "device": spec.to_dict() if spec else None})
 
+                elif action == "connect" and method == "POST":
+                    verify_auth = bool(payload.get("verify_auth", False))
+                    info = self.lab.connect_ssh(dev_name, verify_auth=verify_auth)
+                    return json_resp(info)
+
+                elif action == "serial-connect" and method == "POST":
+                    auto_login = bool(payload.get("auto_login", True))
+                    info = self.lab.connect_serial(dev_name, auto_login=auto_login)
+                    return json_resp(info)
+
+                elif action == "serial-exec" and method == "POST":
+                    cmd = str(payload.get("command", "uname -a"))
+                    timeout = float(payload.get("timeout", 30.0))
+                    info = self.lab.run_serial(dev_name, command=cmd, timeout=timeout)
+                    return json_resp(info)
+
+                elif action == "deploy-agent" and method == "POST":
+                    server_url = str(payload.get("server_url", "http://127.0.0.1:8080"))
+                    interval = int(payload.get("interval", 15))
+                    prefer_shell = bool(payload.get("prefer_shell", False))
+                    info = self.lab.deploy_agent(
+                        dev_name,
+                        server_url=server_url,
+                        interval=interval,
+                        prefer_shell=prefer_shell,
+                    )
+                    return json_resp(info)
+
+                elif action == "deploy" and method == "POST":
+                    info = self.lab.deploy_to_device(
+                        name=dev_name,
+                        remote_path=str(payload.get("remote_path", "/tmp/damf_deploy")),
+                        local_path=payload.get("local_path") or None,
+                        content=payload.get("content"),
+                        filename=payload.get("filename") or None,
+                        structure=payload.get("structure") if isinstance(payload.get("structure"), dict) else None,
+                        extract_archive=bool(payload.get("extract_archive", True)),
+                        chmod=payload.get("chmod") or None,
+                        post_deploy_cmd=payload.get("post_deploy_cmd") or None,
+                    )
+                    return json_resp(info)
+
+                elif action == "telemetry" and method == "GET":
+                    refresh = query.get("refresh", "").lower() in ("1", "true", "yes")
+                    lines = int(query.get("lines", "25"))
+                    info = self.lab.get_telemetry(dev_name, refresh=refresh, log_lines=lines)
+                    return json_resp(info)
+
+                elif action == "logs":
+                    max_lines = int(payload.get("max_lines") or query.get("lines") or 200)
+                    remote_files = payload.get("remote_files")
+                    if not remote_files and query.get("files"):
+                        remote_files = [f.strip() for f in query["files"].split(",") if f.strip()]
+                    output_dir = payload.get("output_dir") or query.get("output_dir")
+                    info = self.lab.copy_system_logs(
+                        dev_name,
+                        output_dir=output_dir,
+                        max_lines=max_lines,
+                        remote_files=remote_files,
+                    )
+                    if method == "GET" and query.get("format", "").lower() in ("raw", "text", "download"):
+                        return 200, "text/plain; charset=utf-8", info["combined_text"].encode("utf-8")
+                    return json_resp(info)
+
+                elif action == "reboot" and method == "POST":
+                    via_ssh = bool(payload.get("via_ssh", True))
+                    force_os = bool(payload.get("force_os_probe", False))
+                    info = self.lab.reboot_device(dev_name, via_ssh=via_ssh, force_os_probe=force_os)
+                    return json_resp(info)
+
                 elif action == "power" and method == "POST":
                     dev = self.lab.get_device(dev_name)
                     pwr_action = str(payload.get("action", "on")).lower()
+                    if pwr_action in ("reboot", "reset", "cycle"):
+                        info = self.lab.reboot_device(dev_name, via_ssh=bool(payload.get("via_ssh", True)))
+                        return json_resp(info)
                     if pwr_action == "on":
                         dev.power_on()
                     elif pwr_action == "off":
                         dev.power_off()
-                    elif pwr_action in ("reboot", "reset", "cycle"):
-                        dev.reboot(delay_sec=0.05)
                     self.lab.register_device(dev.spec, overwrite=True)
                     return json_resp({"device": dev.name, "power_state": dev.power_state})
 

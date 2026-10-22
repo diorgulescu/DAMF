@@ -32,6 +32,7 @@ class PowerType(str, Enum):
     """Supported power controller backends."""
 
     SIMULATED = "simulated"
+    SSH = "ssh"
     WEBHOOK = "webhook"
     USB_HUB = "usb_hub"
     IPMI = "ipmi"

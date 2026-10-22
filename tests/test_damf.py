@@ -14,6 +14,7 @@ from damf import (
     ADBScanner,
     ARPScanner,
     CommandResult,
+    DAMFAgent,
     DAMFWebApp,
     Device,
     DeviceBusyError,
@@ -26,10 +27,16 @@ from damf import (
     ResourcePool,
     ResultParser,
     SerialScanner,
+    TransportError,
+    collect_telemetry,
     create_http_server,
+    determine_reboot_command,
+    device_supports_serial,
     dump_yaml,
+    generate_posix_shell_agent,
     lookup_mac_vendor,
     normalize_mac,
+    parse_os_probe_output,
     safe_load_yaml,
 )
 from damf.cli import main as cli_main
@@ -202,43 +209,49 @@ class TestStep4PoolLabAndResults(unittest.TestCase):
 
     def test_lab_acquire_release_and_conflict(self) -> None:
         lab = Lab(db_path=":memory:", seed_demo=True)
-        self.assertGreaterEqual(len(lab.devices()), 5)
+        try:
+            self.assertGreaterEqual(len(lab.devices()), 5)
 
-        with lab.acquire(board_type="raspberry-pi-4", owner="tester-1") as dev:
-            self.assertEqual(dev.board_type, "raspberry-pi-4")
-            # Attempting to reserve the same device by another user raises DeviceBusyError
-            with self.assertRaises(DeviceBusyError):
-                lab.pool.reserve(name=dev.name, owner="tester-2")
+            with lab.acquire(board_type="raspberry-pi-4", owner="tester-1") as dev:
+                self.assertEqual(dev.board_type, "raspberry-pi-4")
+                # Attempting to reserve the same device by another user raises DeviceBusyError
+                with self.assertRaises(DeviceBusyError):
+                    lab.pool.reserve(name=dev.name, owner="tester-2")
 
-            suite = lab.run_test_suite(dev, commands={"check_uname": "uname -a"}, suite_name="smoke")
-            self.assertEqual(suite.passed, 1)
-            self.assertEqual(suite.failed, 0)
+                suite = lab.run_test_suite(dev, commands={"check_uname": "uname -a"}, suite_name="smoke")
+                self.assertEqual(suite.passed, 1)
+                self.assertEqual(suite.failed, 0)
 
-        # After exiting the `with` block, the device is automatically released
-        spec_after = lab.pool.get_device(dev.name)
-        assert spec_after is not None
-        self.assertEqual(spec_after.state, "available")
-        self.assertEqual(spec_after.owner, "")
+            # After exiting the `with` block, the device is automatically released
+            spec_after = lab.pool.get_device(dev.name)
+            assert spec_after is not None
+            self.assertEqual(spec_after.state, "available")
+            self.assertEqual(spec_after.owner, "")
+        finally:
+            lab.close()
 
     def test_cluster_acquisition_and_ttl_expiry(self) -> None:
         lab = Lab(db_path=":memory:", seed_demo=True)
-        with lab.acquire_cluster(
-            {
-                "master": {"board_type": "raspberry-pi-4"},
-                "dut": {"board_type": "ti-am62x"},
-            },
-            owner="cluster-job",
-        ) as cluster:
-            self.assertIn("master", cluster)
-            self.assertIn("dut", cluster)
-            self.assertEqual(cluster["dut"].board_type, "ti-am62x")
+        try:
+            with lab.acquire_cluster(
+                {
+                    "master": {"board_type": "raspberry-pi-4"},
+                    "dut": {"board_type": "ti-am62x"},
+                },
+                owner="cluster-job",
+            ) as cluster:
+                self.assertIn("master", cluster)
+                self.assertIn("dut", cluster)
+                self.assertEqual(cluster["dut"].board_type, "ti-am62x")
 
-        # Verify TTL expiration
-        spec, _ = lab.pool.reserve(name="rpi4-lab-01", owner="temp-user", ttl_seconds=-1.0)
-        self.assertEqual(lab.pool.expire_stale_reservations(), 1)
-        refreshed = lab.pool.get_device(spec.name)
-        assert refreshed is not None
-        self.assertEqual(refreshed.state, "available")
+            # Verify TTL expiration
+            spec, _ = lab.pool.reserve(name="rpi4-lab-01", owner="temp-user", ttl_seconds=-1.0)
+            self.assertEqual(lab.pool.expire_stale_reservations(), 1)
+            refreshed = lab.pool.get_device(spec.name)
+            assert refreshed is not None
+            self.assertEqual(refreshed.state, "available")
+        finally:
+            lab.close()
 
     def test_result_parser_junit_xml(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -318,6 +331,417 @@ class TestStep5WebServerCLIAndLegacy(unittest.TestCase):
             dm.submit_test_request(safe_load_yaml(job_file.read_text(encoding="utf-8")))
             xml_report = Path(dm.workspace) / "test_results" / "uname.xml"
             self.assertTrue(xml_report.exists())
+            dm.resource_pool.close()
+
+
+class TestTopologySSHAndContextReboot(unittest.TestCase):
+    """Tests for manual topology definition, SSH connection, and OS-aware SSH reboot."""
+
+    def test_manual_topology_device_creation_and_bidirectional_links(self) -> None:
+        lab = Lab(db_path=":memory:", seed_demo=False)
+        try:
+            rpi = lab.define_device(
+                name="rpi4-custom-01",
+                board_type="raspberry-pi-4",
+                ip_address="192.168.50.10",
+                ssh_user="pi",
+                ssh_port=2222,
+                identity_file="/home/pi/.ssh/id_ed25519",
+                os_hint="raspbian",
+                simulated=True,
+            )
+            self.assertEqual(rpi.subnet, "192.168.50.0/24")
+            self.assertEqual(rpi.transport_config["user"], "pi")
+            self.assertEqual(rpi.transport_config["port"], 2222)
+
+            ti = lab.define_device(
+                name="ti-evm-custom-01",
+                board_type="ti-am62x",
+                ip_address="192.168.50.20",
+                ssh_user="root",
+                os_hint="busybox",
+                connected_to=["rpi4-custom-01"],
+                simulated=True,
+            )
+            self.assertIn("rpi4-custom-01", ti.connected_to)
+            # Verify bidirectional link sync on rpi4-custom-01
+            rpi_reloaded = lab.pool.get_device("rpi4-custom-01")
+            assert rpi_reloaded is not None
+            self.assertIn("ti-evm-custom-01", rpi_reloaded.connected_to)
+
+            topo = lab.topology()
+            self.assertIn("192.168.50.0/24", topo["subnets"])
+            self.assertEqual(len(topo["links"]), 1)
+
+            # Unlink and re-link
+            lab.unlink_devices("rpi4-custom-01", "ti-evm-custom-01")
+            self.assertEqual(len(lab.topology()["links"]), 0)
+            lab.link_devices("rpi4-custom-01", "ti-evm-custom-01")
+            self.assertEqual(len(lab.topology()["links"]), 1)
+        finally:
+            lab.close()
+
+    def test_ssh_connection_and_os_context_aware_reboot(self) -> None:
+        # 1. Verify probe parsing & reboot command selection across OS contexts
+        debian_probe = (
+            "__DAMF_KERNEL__\nLinux\n__DAMF_ARCH__\naarch64\n"
+            "__DAMF_OS_RELEASE__\nID=debian\nPRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\n"
+            "__DAMF_INIT__\nsystemd\n"
+        )
+        os_deb = parse_os_probe_output(debian_probe)
+        self.assertEqual(os_deb["kernel"], "Linux")
+        self.assertEqual(os_deb["distro"], "debian")
+        self.assertEqual(os_deb["init_system"], "systemd")
+        self.assertEqual(
+            determine_reboot_command(os_deb, user="pi"),
+            "sudo -n systemctl reboot || sudo -n /sbin/reboot",
+        )
+        self.assertEqual(
+            determine_reboot_command(os_deb, user="root"),
+            "systemctl reboot || /sbin/reboot",
+        )
+
+        busybox_probe = (
+            "__DAMF_KERNEL__\nLinux\n__DAMF_ARCH__\narmv7l\n"
+            "__DAMF_OS_RELEASE__\nID=buildroot\nPRETTY_NAME=\"Buildroot 2026.02\"\n"
+            "__DAMF_INIT__\ninit\n__DAMF_REBOOT_BIN__\nlrwxrwxrwx 1 root root 14 /sbin/reboot -> ../bin/busybox\n"
+        )
+        os_bb = parse_os_probe_output(busybox_probe)
+        self.assertEqual(os_bb["init_system"], "busybox")
+        self.assertEqual(
+            determine_reboot_command(os_bb, user="root"),
+            "/sbin/reboot || reboot -f",
+        )
+
+        freebsd_probe = "__DAMF_KERNEL__\nFreeBSD\n__DAMF_ARCH__\narm64\n__DAMF_INIT__\ninit\n"
+        os_bsd = parse_os_probe_output(freebsd_probe)
+        self.assertEqual(os_bsd["kernel"], "FreeBSD")
+        self.assertEqual(
+            determine_reboot_command(os_bsd, user="admin"),
+            "sudo -n /sbin/shutdown -r now || sudo -n /sbin/reboot",
+        )
+
+        # 2. Verify end-to-end SSH connect & reboot via Lab, REST API, and CLI
+        lab = Lab(db_path=":memory:", seed_demo=True)
+        web_app = DAMFWebApp(lab=lab)
+        client = RemoteLabClient(app=web_app)
+        try:
+            created = client.add_device(
+                name="beagleplay-ssh-01",
+                board_type="ti-am62x",
+                ip_address="192.168.10.188",
+                ssh_user="debian",
+                ssh_port=22,
+                os_hint="debian",
+                connected_to=["rpi4-lab-01"],
+                simulated=True,
+            )
+            self.assertEqual(created["name"], "beagleplay-ssh-01")
+
+            conn_info = client.connect_ssh("beagleplay-ssh-01")
+            self.assertTrue(conn_info["connected"])
+            self.assertEqual(conn_info["os_info"]["init_system"], "systemd")
+            self.assertIn("ssh", conn_info["interactive_cmd"])
+
+            reb_info = client.reboot("beagleplay-ssh-01", via_ssh=True)
+            self.assertEqual(reb_info["returncode"], 0)
+            self.assertEqual(
+                reb_info["reboot_command"],
+                "sudo -n systemctl reboot || sudo -n /sbin/reboot",
+            )
+        finally:
+            lab.close()
+
+        # 3. Verify CLI `add-device`, `link`, `ssh`, and `reboot`
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_file = Path(tmpdir) / "topo.db"
+            self.assertEqual(
+                cli_main(
+                    [
+                        "--db",
+                        str(db_file),
+                        "add-device",
+                        "ti-busybox-board",
+                        "--ip",
+                        "192.168.10.77",
+                        "--type",
+                        "ti-am335x",
+                        "--user",
+                        "root",
+                        "--os",
+                        "busybox",
+                        "--simulated",
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(cli_main(["--db", str(db_file), "ssh", "ti-busybox-board"]), 0)
+            self.assertEqual(cli_main(["--db", str(db_file), "reboot", "ti-busybox-board"]), 0)
+
+
+class TestTargetHeartbeatAgentAndTelemetry(unittest.TestCase):
+    """Tests for the two-tier target heartbeat agent, SSH deployment, telemetry, and offline detection."""
+
+    def test_agent_telemetry_collection_and_posix_shell_generator(self) -> None:
+        snap = collect_telemetry(device_name="rpi4-test", board_type="raspberry-pi-4", log_lines=5)
+        self.assertEqual(snap["device_name"], "rpi4-test")
+        self.assertIn("load_1m", snap)
+        self.assertIn("mem_percent", snap)
+        self.assertIsInstance(snap["logs"], list)
+
+        sh_script = generate_posix_shell_agent("http://192.168.10.1:8080", "ti-am335x-01", interval=10)
+        self.assertIn("#!/bin/sh", sh_script)
+        self.assertIn("/api/v1/agent/heartbeat", sh_script)
+        self.assertIn("ti-am335x-01", sh_script)
+
+    def test_agent_push_heartbeat_deploy_and_offline_timeout(self) -> None:
+        lab = Lab(db_path=":memory:", seed_demo=True)
+        web_app = DAMFWebApp(lab=lab)
+        client = RemoteLabClient(app=web_app)
+        try:
+            # 1. Push a heartbeat from DAMFAgent to the server
+            agent = DAMFAgent(device_name="rpi4-lab-01", app=web_app)
+            ack = agent.send_heartbeat(
+                {
+                    "device_name": "rpi4-lab-01",
+                    "load_1m": 1.42,
+                    "load_5m": 0.88,
+                    "load_15m": 0.45,
+                    "mem_total_mb": 4096.0,
+                    "mem_used_mb": 1024.0,
+                    "mem_percent": 25.0,
+                    "cpu_temp_c": 51.2,
+                    "uptime_seconds": 3600.0,
+                    "logs": ["[120.1] kernel: eth0 link becomes ready", "[125.0] systemd: target reached"],
+                }
+            )
+            self.assertTrue(ack["ack"])
+
+            # 2. Fetch vital telemetry via REST client
+            tel = client.get_telemetry("rpi4-lab-01")
+            self.assertEqual(tel["load_1m"], 1.42)
+            self.assertEqual(tel["cpu_temp_c"], 51.2)
+            self.assertEqual(len(tel["logs"]), 2)
+
+            # 3. Deploy Tier-1 (Python) agent on Debian board & Tier-2 (POSIX sh) agent on BusyBox board
+            dep_py = client.deploy_agent("rpi4-lab-01", server_url="http://192.168.10.1:8080", interval=15)
+            self.assertEqual(dep_py["agent_tier"], "python")
+
+            lab.define_device(
+                name="ti-minimal-busybox",
+                board_type="ti-am335x",
+                ip_address="192.168.10.199",
+                os_hint="busybox",
+                simulated=True,
+            )
+            dep_sh = client.deploy_agent("ti-minimal-busybox", server_url="http://192.168.10.1:8080", interval=15)
+            self.assertEqual(dep_sh["agent_tier"], "posix-sh")
+
+            # 4. Simulate missed heartbeats -> mark offline -> recover on next heartbeat
+            spec = lab.pool.get_device("ti-minimal-busybox")
+            assert spec is not None
+            spec.last_seen = time.time() - 120.0
+            lab.pool.register_device(spec, overwrite=True)
+
+            offline_list = lab.check_agent_health(timeout_seconds=45.0)
+            self.assertIn("ti-minimal-busybox", offline_list)
+            self.assertEqual(lab.pool.get_device("ti-minimal-busybox").state, "offline")  # type: ignore[union-attr]
+
+            # Next heartbeat brings it right back to 'available'
+            DAMFAgent(device_name="ti-minimal-busybox", app=web_app).send_heartbeat()
+            self.assertEqual(lab.pool.get_device("ti-minimal-busybox").state, "available")  # type: ignore[union-attr]
+        finally:
+            lab.close()
+
+    def test_on_demand_copy_system_logs_sdk_api_and_cli(self) -> None:
+        lab = Lab(db_path=":memory:", seed_demo=True)
+        web_app = DAMFWebApp(lab=lab)
+        client = RemoteLabClient(app=web_app)
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                # 1. Copy system logs via Python SDK (Linux SSH target + explicit remote file copy)
+                bundle = lab.copy_system_logs(
+                    "rpi4-lab-01",
+                    output_dir=tmpdir,
+                    max_lines=100,
+                    remote_files=["/var/log/syslog"],
+                )
+                self.assertIn("dmesg", bundle["sources"])
+                self.assertIn("syslog", bundle["sources"])
+                self.assertTrue(Path(bundle["saved_path"]).exists())
+                self.assertEqual(len(bundle["copied_files"]), 2)
+
+                # 2. Copy system logs from Android target (captures logcat + dmesg)
+                android_bundle = client.copy_system_logs("pixel-7-testphone", output_dir=tmpdir)
+                self.assertIn("logcat", android_bundle["sources"])
+                self.assertTrue(Path(android_bundle["saved_path"]).exists())
+
+                # 3. Direct raw .log file download endpoint from Administrative UI
+                status, ctype, raw_bytes = web_app.handle_request(
+                    "GET",
+                    "/api/v1/devices/rpi4-lab-01/logs?format=download",
+                )
+                self.assertEqual(status, 200)
+                self.assertIn("text/plain", ctype)
+                self.assertIn(b"[DMESG]", raw_bytes)
+
+                # 4. CLI `damf copy-logs`
+                self.assertEqual(
+                    cli_main(
+                        [
+                            "--db",
+                            ":memory:",
+                            "--seed-demo",
+                            "copy-logs",
+                            "rpi4-lab-01",
+                            "-o",
+                            tmpdir,
+                        ]
+                    ),
+                    0,
+                )
+        finally:
+            lab.close()
+
+    def test_single_and_lab_wide_fleet_deployment(self) -> None:
+        import tarfile
+
+        lab = Lab(db_path=":memory:", seed_demo=True)
+        web_app = DAMFWebApp(lab=lab)
+        client = RemoteLabClient(app=web_app)
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                # 1. Verify real disk extraction on a LocalTransport target
+                local_target_dir = Path(tmpdir) / "local_board_root"
+                lab.register_device(
+                    DeviceSpec(
+                        name="local-test-node",
+                        board_type="generic-linux",
+                        transport="local",
+                        power_state="on",
+                    )
+                )
+                # Create a .tar.gz archive with a nested folder structure
+                src_tree = Path(tmpdir) / "pkg_src"
+                (src_tree / "bin").mkdir(parents=True)
+                (src_tree / "bin" / "hello.sh").write_text("#!/bin/sh\necho deployed_archive_ok\n", encoding="utf-8")
+                archive_path = Path(tmpdir) / "toolkit.tar.gz"
+                with tarfile.open(archive_path, "w:gz") as tf:
+                    tf.add(src_tree / "bin", arcname="bin")
+
+                dep_archive = lab.deploy_to_device(
+                    name="local-test-node",
+                    remote_path=str(local_target_dir),
+                    local_path=archive_path,
+                    extract_archive=True,
+                    chmod="755",
+                    post_deploy_cmd="sh bin/hello.sh",
+                )
+                self.assertEqual(dep_archive["mode"], "archive_extract")
+                self.assertTrue((local_target_dir / "bin" / "hello.sh").exists())
+                self.assertIn("deployed_archive_ok", dep_archive["post_deploy_output"])
+
+                # 2. Fleet-wide single-procedure deployment of a folder structure to ALL lab targets
+                fleet_report = client.deploy_to_lab(
+                    remote_path=str(Path(tmpdir) / "fleet_dest"),
+                    structure={
+                        "bin/run_hil.sh": "#!/bin/sh\necho hil_ok\n",
+                        "conf/lab.yml": "env: production\n",
+                    },
+                    chmod="755",
+                )
+                self.assertEqual(fleet_report["failed"], 0)
+                self.assertEqual(fleet_report["succeeded"], 6)  # 5 demo boards + local-test-node
+
+                # 3. CLI broadcast deployment to all boards
+                self.assertEqual(
+                    cli_main(
+                        [
+                            "--db",
+                            ":memory:",
+                            "--seed-demo",
+                            "deploy",
+                            "--all",
+                            "--dest",
+                            "/opt/damf_env",
+                            "--content",
+                            "export LAB_READY=1",
+                            "--filename",
+                            "profile.sh",
+                            "--chmod",
+                            "755",
+                        ]
+                    ),
+                    0,
+                )
+        finally:
+            lab.close()
+
+    def test_serial_connection_console_state_and_dual_transport(self) -> None:
+        lab = Lab(db_path=":memory:", seed_demo=True)
+        web_app = DAMFWebApp(lab=lab)
+        client = RemoteLabClient(app=web_app)
+        try:
+            # 1. Pure serial target (ti-am62x-evm-01 on /dev/ttyUSB0)
+            ser_dev = lab.get_device("ti-am62x-evm-01")
+            self.assertTrue(ser_dev.supports_serial)
+            self.assertTrue(device_supports_serial(ser_dev.spec))
+
+            ser_info = lab.connect_serial("ti-am62x-evm-01")
+            self.assertTrue(ser_info["connected"])
+            self.assertEqual(ser_info["serial_port"], "/dev/ttyUSB0")
+            self.assertEqual(ser_info["baudrate"], 115200)
+            self.assertEqual(ser_info["console_state"], "shell")
+            self.assertIn("os_info", ser_info)
+
+            # 2. Dual-transport target (primary SSH + secondary UART /dev/ttyUSB1 on rpi4-lab-01)
+            rpi_dev = lab.get_device("rpi4-lab-01")
+            self.assertEqual(rpi_dev.spec.transport, "ssh")
+            self.assertTrue(rpi_dev.supports_serial)
+
+            rpi_serial_info = client.connect_serial("rpi4-lab-01")
+            self.assertTrue(rpi_serial_info["connected"])
+            self.assertEqual(rpi_serial_info["serial_port"], "/dev/ttyUSB1")
+            self.assertEqual(rpi_serial_info["console_state"], "shell")
+
+            exec_res = client.run_serial("rpi4-lab-01", "uname -a")
+            self.assertEqual(exec_res["returncode"], 0)
+            self.assertEqual(exec_res["serial_port"], "/dev/ttyUSB1")
+            self.assertIn("Linux", exec_res["stdout"])
+
+            # 3. U-Boot console state detection over serial
+            uboot_spec = lab.define_device(
+                name="ti-uboot-serial",
+                board_type="ti-am62x",
+                transport="serial",
+                serial_port="/dev/ttyUSB3",
+                baudrate=115200,
+                simulated=True,
+            )
+            uboot_spec.transport_config["console_state"] = "uboot"
+            lab.register_device(uboot_spec, overwrite=True)
+            uboot_info = lab.connect_serial("ti-uboot-serial")
+            self.assertEqual(uboot_info["console_state"], "uboot")
+            uboot_cmd = lab.run_serial("ti-uboot-serial", "version")
+            self.assertIn("U-Boot", uboot_cmd["stdout"])
+
+            # 4. Target that does NOT support serial raises TransportError (HTTP 400 in REST API)
+            android_dev = lab.get_device("pixel-7-testphone")
+            self.assertFalse(android_dev.supports_serial)
+            with self.assertRaises(TransportError):
+                lab.connect_serial("pixel-7-testphone")
+
+            # 5. CLI `damf serial` connect and command execution
+            self.assertEqual(
+                cli_main(["--db", ":memory:", "--seed-demo", "serial", "ti-am62x-evm-01"]),
+                0,
+            )
+            self.assertEqual(
+                cli_main(["--db", ":memory:", "--seed-demo", "serial", "rpi4-lab-01", "-c", "uname -a"]),
+                0,
+            )
+        finally:
+            lab.close()
 
 
 if __name__ == "__main__":

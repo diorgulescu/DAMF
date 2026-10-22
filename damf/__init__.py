@@ -4,6 +4,7 @@ Public Python SDK for discovering, reserving, controlling, and testing embedded
 devices and development boards (Raspberry Pi, Texas Instruments, Linux SBCs, Android).
 """
 
+from damf.agent import DAMFAgent, collect_telemetry, generate_posix_shell_agent
 from damf.config import dump_yaml, load_config_file, safe_load_all_yaml, safe_load_yaml
 from damf.device import Device
 from damf.discovery import (
@@ -44,6 +45,7 @@ from damf.power import (
     IPMIPowerController,
     PowerController,
     SimulatedPowerController,
+    SSHPowerController,
     USBHubPowerController,
     WebhookPowerController,
     create_power_controller,
@@ -56,6 +58,9 @@ from damf.transports import (
     SSHTransport,
     Transport,
     create_transport,
+    determine_reboot_command,
+    device_supports_serial,
+    parse_os_probe_output,
 )
 from damf.web import DAMFWebApp, create_http_server
 
@@ -66,6 +71,9 @@ __all__ = [
     "Lab",
     "RemoteLabClient",
     "Device",
+    "DAMFAgent",
+    "collect_telemetry",
+    "generate_posix_shell_agent",
     "ResourcePool",
     "ResultParser",
     "DiscoveryEngine",
@@ -90,8 +98,12 @@ __all__ = [
     "ADBTransport",
     "LocalTransport",
     "create_transport",
+    "device_supports_serial",
+    "parse_os_probe_output",
+    "determine_reboot_command",
     "PowerController",
     "SimulatedPowerController",
+    "SSHPowerController",
     "WebhookPowerController",
     "USBHubPowerController",
     "IPMIPowerController",

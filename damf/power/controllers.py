@@ -57,6 +57,49 @@ class SimulatedPowerController(PowerController):
         return self.spec.power_state or "off"
 
 
+class SSHPowerController(PowerController):
+    """Controls board reboot and power-off over SSH by detecting the target OS and issuing the appropriate command."""
+
+    def _ssh_transport(self) -> Any:
+        from damf.transports.ssh import SSHTransport
+
+        return SSHTransport(self.spec)
+
+    def power_on(self) -> None:
+        # Soft power-on over SSH marks the board as online if reachable (or in simulated mode)
+        ssh = self._ssh_transport()
+        ssh.connect()
+        self.spec.power_state = "on"
+
+    def power_off(self) -> None:
+        ssh = self._ssh_transport()
+        os_info = ssh.detect_os()
+        sudo_prefix = "" if ssh.user == "root" else "sudo -n "
+        kernel = os_info.get("kernel", "Linux")
+        init_system = os_info.get("init_system", "sysvinit")
+        if kernel == "Linux" and init_system == "systemd":
+            cmd = f"{sudo_prefix}systemctl poweroff || {sudo_prefix}/sbin/poweroff"
+        elif kernel in ("FreeBSD", "OpenBSD", "NetBSD", "Darwin"):
+            cmd = f"{sudo_prefix}/sbin/shutdown -p now || {sudo_prefix}/sbin/halt"
+        else:
+            cmd = f"{sudo_prefix}/sbin/poweroff || {sudo_prefix}poweroff"
+        res = ssh.run(cmd, timeout=15.0)
+        if res.returncode not in (0, 255) and "closed by remote host" not in res.stderr.lower():
+            raise PowerControlError(f"SSH poweroff failed on '{self.spec.name}': {res.stderr or res.stdout}")
+        self.spec.power_state = "off"
+
+    def reboot(self, delay_sec: float = 0.0) -> None:
+        ssh = self._ssh_transport()
+        ssh.reboot_over_ssh()
+        self.spec.power_state = "on"
+
+    def status(self) -> str:
+        ssh = self._ssh_transport()
+        if ssh.is_alive():
+            self.spec.power_state = "on"
+        return self.spec.power_state or "unknown"
+
+
 class WebhookPowerController(PowerController):
     """Controls smart plugs / network relays (Shelly, Tasmota, Home Assistant, REST PDUs) over HTTP."""
 
@@ -194,6 +237,8 @@ def create_power_controller(spec: DeviceSpec) -> PowerController:
     kind = (spec.power_type or PowerType.SIMULATED.value).lower()
     if kind == PowerType.SIMULATED.value:
         return SimulatedPowerController(spec)
+    if kind == PowerType.SSH.value:
+        return SSHPowerController(spec)
     if kind == PowerType.WEBHOOK.value:
         return WebhookPowerController(spec)
     if kind == PowerType.USB_HUB.value:

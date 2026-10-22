@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 import json
 from pathlib import Path
@@ -80,8 +81,286 @@ class Lab:
         return lab
 
     def register_device(self, spec: DeviceSpec | dict[str, Any], overwrite: bool = True) -> DeviceSpec:
-        """Add or update a device in the lab pool."""
-        return self.pool.register_device(spec, overwrite=overwrite)
+        """Add or update a device in the lab pool and synchronize bidirectional topology links."""
+        registered = self.pool.register_device(spec, overwrite=overwrite)
+        for peer_name in registered.connected_to:
+            peer = self.pool.get_device(peer_name)
+            if peer is not None and registered.name not in peer.connected_to:
+                peer.connected_to.append(registered.name)
+                self.pool.register_device(peer, overwrite=True)
+        return registered
+
+    def define_device(
+        self,
+        name: str,
+        board_type: str = "generic-linux",
+        ip_address: str = "",
+        subnet: str | None = None,
+        arch: str = "arm64",
+        transport: str = "ssh",
+        ssh_user: str = "root",
+        ssh_port: int = 22,
+        identity_file: str | None = None,
+        password: str | None = None,
+        os_hint: str | None = None,
+        connected_to: list[str] | None = None,
+        tags: list[str] | None = None,
+        simulated: bool = False,
+        power_type: str = "ssh",
+        serial_port: str | None = None,
+        baudrate: int = 115200,
+    ) -> DeviceSpec:
+        """Manually define and register a device in the lab topology with SSH and/or Serial settings."""
+        if not subnet:
+            if ip_address and "." in ip_address:
+                subnet = ".".join(ip_address.split(".")[:3]) + ".0/24"
+            elif transport == "serial" or serial_port:
+                subnet = "local-serial"
+            else:
+                subnet = "192.168.10.0/24"
+        t_cfg: dict[str, Any] = {
+            "user": ssh_user,
+            "port": int(ssh_port),
+            "simulated": bool(simulated),
+        }
+        if identity_file:
+            t_cfg["identity_file"] = identity_file
+        if password:
+            t_cfg["password"] = password
+        if serial_port:
+            t_cfg["serial_port"] = serial_port
+            t_cfg["baudrate"] = int(baudrate)
+            if transport == "serial":
+                t_cfg["port"] = serial_port
+        attrs: dict[str, Any] = {}
+        if os_hint:
+            attrs["os"] = os_hint
+
+        spec = DeviceSpec(
+            name=name,
+            board_type=board_type,
+            arch=arch,
+            ip_address=ip_address,
+            subnet=subnet,
+            transport=transport,
+            transport_config=t_cfg,
+            power_type=power_type if not simulated else "simulated",
+            power_state="on",
+            tags=list(tags or []),
+            attributes=attrs,
+            connected_to=list(connected_to or []),
+        )
+        return self.register_device(spec, overwrite=True)
+
+    def link_devices(self, device_a: str, device_b: str) -> dict[str, Any]:
+        """Create a bidirectional topology link between two devices in the lab."""
+        dev_a = self.pool.get_device(device_a)
+        dev_b = self.pool.get_device(device_b)
+        if dev_a is None:
+            from damf.exceptions import DeviceNotFoundError
+
+            raise DeviceNotFoundError(f"Device '{device_a}' not found")
+        if dev_b is None:
+            from damf.exceptions import DeviceNotFoundError
+
+            raise DeviceNotFoundError(f"Device '{device_b}' not found")
+        if device_b not in dev_a.connected_to:
+            dev_a.connected_to.append(device_b)
+            self.pool.register_device(dev_a, overwrite=True)
+        if device_a not in dev_b.connected_to:
+            dev_b.connected_to.append(device_a)
+            self.pool.register_device(dev_b, overwrite=True)
+        return {"source": device_a, "target": device_b, "linked": True}
+
+    def unlink_devices(self, device_a: str, device_b: str) -> dict[str, Any]:
+        """Remove a topology link between two devices in the lab."""
+        dev_a = self.pool.get_device(device_a)
+        dev_b = self.pool.get_device(device_b)
+        if dev_a is not None and device_b in dev_a.connected_to:
+            dev_a.connected_to = [p for p in dev_a.connected_to if p != device_b]
+            self.pool.register_device(dev_a, overwrite=True)
+        if dev_b is not None and device_a in dev_b.connected_to:
+            dev_b.connected_to = [p for p in dev_b.connected_to if p != device_a]
+            self.pool.register_device(dev_b, overwrite=True)
+        return {"source": device_a, "target": device_b, "linked": False}
+
+    def connect_ssh(self, name: str, verify_auth: bool = False) -> dict[str, Any]:
+        """Connect to `name` over SSH, detect its running OS, and persist metadata to the pool."""
+        dev = self.get_device(name)
+        info = dev.connect_ssh(verify_auth=verify_auth)
+        self.pool.register_device(dev.spec, overwrite=True)
+        return info
+
+    def connect_serial(self, name: str, auto_login: bool = True) -> dict[str, Any]:
+        """Connect to `name` over serial (UART), detect console state (shell/login/uboot) and OS, and persist metadata."""
+        dev = self.get_device(name)
+        info = dev.connect_serial(auto_login=auto_login)
+        self.pool.register_device(dev.spec, overwrite=True)
+        return info
+
+    def run_serial(self, name: str, command: str, timeout: float = 30.0) -> dict[str, Any]:
+        """Run a command over the serial UART console of `name` even if its primary transport is SSH."""
+        dev = self.get_device(name)
+        res = dev.run_serial(command, timeout=timeout)
+        self.pool.register_device(dev.spec, overwrite=True)
+        return {
+            "device": dev.name,
+            "serial_port": dev.spec.transport_config.get("serial_port") or dev.spec.transport_config.get("port"),
+            "baudrate": dev.spec.transport_config.get("baudrate", 115200),
+            "command": res.command,
+            "returncode": res.returncode,
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+            "duration_sec": res.duration_sec,
+        }
+
+    def reboot_device(self, name: str, via_ssh: bool = True, force_os_probe: bool = False) -> dict[str, Any]:
+        """Reboot `name` (by default over SSH using OS-appropriate Linux/Unix reboot command)."""
+        dev = self.get_device(name)
+        res = dev.reboot(via_ssh=via_ssh, force_os_probe=force_os_probe)
+        self.pool.register_device(dev.spec, overwrite=True)
+        return {
+            "device": dev.name,
+            "power_state": dev.power_state,
+            "os_info": dev.spec.attributes.get("os_info", {}),
+            "reboot_command": res.command,
+            "returncode": res.returncode,
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+        }
+
+    def record_heartbeat(self, payload: dict[str, Any]) -> DeviceSpec:
+        """Process an incoming heartbeat from a target agent and update device telemetry."""
+        return self.pool.record_heartbeat(payload)
+
+    def check_agent_health(self, timeout_seconds: float = 45.0) -> list[str]:
+        """Mark agent-monitored boards as offline if they missed heartbeats for `timeout_seconds`."""
+        return self.pool.mark_stale_agents_offline(timeout_seconds=timeout_seconds)
+
+    def deploy_agent(
+        self,
+        name: str,
+        server_url: str = "http://127.0.0.1:8080",
+        interval: int = 15,
+        prefer_shell: bool = False,
+    ) -> dict[str, Any]:
+        """Deploy and start the DAMF heartbeat/telemetry agent on `name` over SSH."""
+        dev = self.get_device(name)
+        info = dev.deploy_agent(server_url=server_url, interval=interval, prefer_shell=prefer_shell)
+        self.pool.register_device(dev.spec, overwrite=True)
+        return info
+
+    def get_telemetry(self, name: str, refresh: bool = False, log_lines: int = 25) -> dict[str, Any]:
+        """Get vital telemetry (CPU load, RAM, Temp, Uptime, System Logs) for `name`."""
+        dev = self.get_device(name)
+        info = dev.fetch_telemetry(refresh=refresh, log_lines=log_lines)
+        self.pool.register_device(dev.spec, overwrite=True)
+        return info
+
+    def copy_system_logs(
+        self,
+        name: str,
+        output_dir: str | Path | None = None,
+        max_lines: int = 200,
+        remote_files: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """On-demand copy of system/kernel logs from target `name` to `output_dir` (and pool cache)."""
+        dev = self.get_device(name)
+        info = dev.copy_system_logs(output_dir=output_dir, max_lines=max_lines, remote_files=remote_files)
+        self.pool.register_device(dev.spec, overwrite=True)
+        return info
+
+    def deploy_to_device(
+        self,
+        name: str,
+        remote_path: str,
+        local_path: str | Path | None = None,
+        content: str | None = None,
+        filename: str | None = None,
+        structure: dict[str, str] | None = None,
+        extract_archive: bool = True,
+        chmod: str | None = None,
+        post_deploy_cmd: str | None = None,
+    ) -> dict[str, Any]:
+        """Deploy a file, directory, archive, inline content, or folder structure to a single target `name`."""
+        dev = self.get_device(name)
+        info = dev.deploy_content(
+            remote_path=remote_path,
+            local_path=local_path,
+            content=content,
+            filename=filename,
+            structure=structure,
+            extract_archive=extract_archive,
+            chmod=chmod,
+            post_deploy_cmd=post_deploy_cmd,
+        )
+        self.pool.register_device(dev.spec, overwrite=True)
+        return info
+
+    def deploy_to_lab(
+        self,
+        remote_path: str,
+        local_path: str | Path | None = None,
+        content: str | None = None,
+        filename: str | None = None,
+        structure: dict[str, str] | None = None,
+        extract_archive: bool = True,
+        chmod: str | None = None,
+        post_deploy_cmd: str | None = None,
+        target_names: list[str] | None = None,
+        board_type: str | None = None,
+        arch: str | None = None,
+        tags: list[str] | None = None,
+        include_offline: bool = False,
+    ) -> dict[str, Any]:
+        """Single-procedure fleet deployment: deploy a folder structure, archive, file, or inline content
+        across all (or filtered) lab targets concurrently.
+        """
+        if target_names:
+            specs = [self.pool.get_device(n) for n in target_names]
+            targets = [s.name for s in specs if s is not None]
+        else:
+            candidates = self.devices(board_type=board_type, arch=arch, tags=tags)
+            if not include_offline:
+                candidates = [c for c in candidates if c.state != "offline"]
+            targets = [c.name for c in candidates]
+
+        results: dict[str, dict[str, Any]] = {}
+
+        def _deploy_one(dev_name: str) -> tuple[str, dict[str, Any]]:
+            try:
+                res = self.deploy_to_device(
+                    name=dev_name,
+                    remote_path=remote_path,
+                    local_path=local_path,
+                    content=content,
+                    filename=filename,
+                    structure=structure,
+                    extract_archive=extract_archive,
+                    chmod=chmod,
+                    post_deploy_cmd=post_deploy_cmd,
+                )
+                return dev_name, res
+            except Exception as exc:
+                return dev_name, {"device": dev_name, "ok": False, "error": str(exc)}
+
+        if targets:
+            with ThreadPoolExecutor(max_workers=min(16, len(targets))) as executor:
+                futures = [executor.submit(_deploy_one, t) for t in targets]
+                for fut in as_completed(futures):
+                    d_name, outcome = fut.result()
+                    results[d_name] = outcome
+
+        succeeded = sum(1 for r in results.values() if r.get("ok"))
+        failed = len(results) - succeeded
+        return {
+            "total_targets": len(results),
+            "succeeded": succeeded,
+            "failed": failed,
+            "remote_path": remote_path,
+            "targets": sorted(results.keys()),
+            "results": results,
+        }
 
     def devices(
         self,
@@ -287,4 +566,153 @@ class RemoteLabClient:
             "POST",
             f"/api/v1/devices/{urllib.parse.quote(name)}/exec",
             {"command": command},
+        )
+
+    def add_device(self, **device_fields: Any) -> dict[str, Any]:
+        """Define/create a new device in the remote lab topology."""
+        return self._request("POST", "/api/v1/devices", device_fields)
+
+    def link_devices(self, source: str, target: str) -> dict[str, Any]:
+        """Create a topology link between two devices on the remote server."""
+        return self._request("POST", "/api/v1/topology/links", {"source": source, "target": target})
+
+    def connect_ssh(self, name: str, verify_auth: bool = False) -> dict[str, Any]:
+        """Connect via SSH to the specified target and detect its OS."""
+        return self._request(
+            "POST",
+            f"/api/v1/devices/{urllib.parse.quote(name)}/connect",
+            {"verify_auth": verify_auth},
+        )
+
+    def connect_serial(self, name: str, auto_login: bool = True) -> dict[str, Any]:
+        """Connect via Serial (UART) to the specified target, detect console state (shell/uboot), and probe OS."""
+        return self._request(
+            "POST",
+            f"/api/v1/devices/{urllib.parse.quote(name)}/serial-connect",
+            {"auto_login": auto_login},
+        )
+
+    def run_serial(self, name: str, command: str, timeout: float = 30.0) -> dict[str, Any]:
+        """Execute a command over the serial UART console of the specified target via REST API."""
+        return self._request(
+            "POST",
+            f"/api/v1/devices/{urllib.parse.quote(name)}/serial-exec",
+            {"command": command, "timeout": timeout},
+        )
+
+    def reboot(self, name: str, via_ssh: bool = True) -> dict[str, Any]:
+        """Trigger a context-aware Linux/Unix SSH reboot on the specified target."""
+        return self._request(
+            "POST",
+            f"/api/v1/devices/{urllib.parse.quote(name)}/reboot",
+            {"via_ssh": via_ssh},
+        )
+
+    def send_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Send an agent heartbeat payload to `/api/v1/agent/heartbeat`."""
+        return self._request("POST", "/api/v1/agent/heartbeat", payload)
+
+    def deploy_agent(
+        self,
+        name: str,
+        server_url: str = "http://127.0.0.1:8080",
+        interval: int = 15,
+        prefer_shell: bool = False,
+    ) -> dict[str, Any]:
+        """Deploy the target heartbeat agent over SSH via the REST API."""
+        return self._request(
+            "POST",
+            f"/api/v1/devices/{urllib.parse.quote(name)}/deploy-agent",
+            {"server_url": server_url, "interval": interval, "prefer_shell": prefer_shell},
+        )
+
+    def get_telemetry(self, name: str, refresh: bool = False) -> dict[str, Any]:
+        """Fetch vital load, memory, temperature, and system logs for `name`."""
+        suffix = "?refresh=1" if refresh else ""
+        return self._request("GET", f"/api/v1/devices/{urllib.parse.quote(name)}/telemetry{suffix}")
+
+    def copy_system_logs(
+        self,
+        name: str,
+        output_dir: str | Path | None = None,
+        max_lines: int = 200,
+        remote_files: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Request on-demand system log collection from target `name` via the REST API and optionally save locally."""
+        resp = self._request(
+            "POST",
+            f"/api/v1/devices/{urllib.parse.quote(name)}/logs",
+            {
+                "max_lines": max_lines,
+                "remote_files": remote_files or [],
+                "output_dir": str(output_dir) if output_dir else None,
+            },
+        )
+        if output_dir is not None and not resp.get("saved_path"):
+            out_dir = Path(output_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_file = out_dir / f"{name}_system_logs.log"
+            out_file.write_text(resp.get("combined_text", ""), encoding="utf-8")
+            resp["saved_path"] = str(out_file)
+        return resp
+
+    def deploy_to_device(
+        self,
+        name: str,
+        remote_path: str,
+        local_path: str | Path | None = None,
+        content: str | None = None,
+        filename: str | None = None,
+        structure: dict[str, str] | None = None,
+        extract_archive: bool = True,
+        chmod: str | None = None,
+        post_deploy_cmd: str | None = None,
+    ) -> dict[str, Any]:
+        """Deploy files, folders, archives, or inline content to a specific device via REST API."""
+        return self._request(
+            "POST",
+            f"/api/v1/devices/{urllib.parse.quote(name)}/deploy",
+            {
+                "remote_path": remote_path,
+                "local_path": str(local_path) if local_path else None,
+                "content": content,
+                "filename": filename,
+                "structure": structure,
+                "extract_archive": extract_archive,
+                "chmod": chmod,
+                "post_deploy_cmd": post_deploy_cmd,
+            },
+        )
+
+    def deploy_to_lab(
+        self,
+        remote_path: str,
+        local_path: str | Path | None = None,
+        content: str | None = None,
+        filename: str | None = None,
+        structure: dict[str, str] | None = None,
+        extract_archive: bool = True,
+        chmod: str | None = None,
+        post_deploy_cmd: str | None = None,
+        target_names: list[str] | None = None,
+        board_type: str | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Deploy a folder structure, archive, file, or content to all (or filtered) lab targets in one procedure."""
+        return self._request(
+            "POST",
+            "/api/v1/deploy",
+            {
+                "remote_path": remote_path,
+                "local_path": str(local_path) if local_path else None,
+                "content": content,
+                "filename": filename,
+                "structure": structure,
+                "extract_archive": extract_archive,
+                "chmod": chmod,
+                "post_deploy_cmd": post_deploy_cmd,
+                "target_names": target_names,
+                "board_type": board_type,
+                "tags": tags,
+            },
         )

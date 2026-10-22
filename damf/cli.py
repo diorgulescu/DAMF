@@ -37,6 +37,83 @@ def build_parser() -> argparse.ArgumentParser:
     p_dev.add_argument("--state", help="Filter by state (available, reserved, offline)")
     p_dev.add_argument("--json", action="store_true", help="Output JSON")
 
+    # damf add-device
+    p_add = sub.add_parser("add-device", help="Manually define/add a device in the lab topology")
+    p_add.add_argument("name", help="Unique device name (e.g. rpi4-bench-01)")
+    p_add.add_argument("--ip", dest="ip_address", default="", help="Target IP address")
+    p_add.add_argument("--type", dest="board_type", default="generic-linux", help="Board type (e.g. raspberry-pi-4, ti-am62x)")
+    p_add.add_argument("--arch", default="arm64", help="CPU architecture (default: arm64)")
+    p_add.add_argument("--subnet", help="Subnet CIDR (auto-inferred from IP if omitted)")
+    p_add.add_argument("--user", dest="ssh_user", default="root", help="SSH username (default: root)")
+    p_add.add_argument("--port", dest="ssh_port", type=int, default=22, help="SSH port (default: 22)")
+    p_add.add_argument("--key", dest="identity_file", help="Path to SSH private key")
+    p_add.add_argument("--os", dest="os_hint", help="Target OS hint (e.g. debian, busybox, poky, freebsd)")
+    p_add.add_argument("--transport", default="ssh", help="Primary transport (ssh, serial, adb, local)")
+    p_add.add_argument("--serial-port", help="Serial UART port if supported (e.g. /dev/ttyUSB0, /dev/ttyACM0)")
+    p_add.add_argument("--baudrate", type=int, default=115200, help="Serial baudrate (default: 115200)")
+    p_add.add_argument("--connect-to", default="", help="Comma-separated peer device names in topology")
+    p_add.add_argument("--tags", default="", help="Comma-separated capability tags")
+    p_add.add_argument("--simulated", action="store_true", help="Enable simulated SSH/Serial mode for testing")
+
+    # damf link
+    p_link = sub.add_parser("link", help="Connect two devices in the lab topology")
+    p_link.add_argument("source", help="First device name")
+    p_link.add_argument("target", help="Second device name")
+
+    # damf ssh
+    p_ssh = sub.add_parser("ssh", help="Connect via SSH to a target device (or probe/run command)")
+    p_ssh.add_argument("name", help="Target device name")
+    p_ssh.add_argument("-c", "--command", help="Optional single command to execute over SSH")
+    p_ssh.add_argument("-i", "--interactive", action="store_true", help="Launch interactive system ssh session")
+
+    # damf serial
+    p_ser = sub.add_parser("serial", help="Connect via Serial (UART) to a target that supports it")
+    p_ser.add_argument("name", help="Target device name")
+    p_ser.add_argument("-c", "--command", help="Optional command to execute over the serial console")
+    p_ser.add_argument("-i", "--interactive", action="store_true", help="Launch interactive serial terminal (picocom/tio/minicom/screen)")
+    p_ser.add_argument("--no-login", action="store_true", help="Do not auto-login if console is at a login: prompt")
+
+    # damf reboot
+    p_reb = sub.add_parser("reboot", help="Reboot a target over SSH using OS-appropriate Linux/Unix reboot command")
+    p_reb.add_argument("name", help="Target device name")
+    p_reb.add_argument("--force-probe", action="store_true", help="Re-probe target OS before rebooting")
+
+    # damf deploy-agent
+    p_dep = sub.add_parser("deploy-agent", help="Deploy & start the heartbeat/telemetry agent on a target over SSH")
+    p_dep.add_argument("name", help="Target device name")
+    p_dep.add_argument("--server", default="http://127.0.0.1:8080", help="DAMF server URL for agent heartbeats")
+    p_dep.add_argument("--interval", type=int, default=15, help="Heartbeat interval in seconds")
+    p_dep.add_argument("--shell", action="store_true", help="Force Tier-2 POSIX/BusyBox shell agent")
+
+    # damf telemetry
+    p_tel = sub.add_parser("telemetry", help="Show vital target load, memory, temperature, and system logs")
+    p_tel.add_argument("name", help="Target device name")
+    p_tel.add_argument("--refresh", action="store_true", help="Query live telemetry from target")
+    p_tel.add_argument("--json", action="store_true", help="Output JSON")
+
+    # damf copy-logs
+    p_logs = sub.add_parser("copy-logs", help="Copy system/kernel logs on demand from a target board")
+    p_logs.add_argument("name", help="Target device name")
+    p_logs.add_argument("-o", "--output-dir", default="./logs", help="Local directory to save copied log bundle")
+    p_logs.add_argument("-n", "--lines", type=int, default=200, help="Max lines per log source (default: 200)")
+    p_logs.add_argument("--files", default="", help="Optional comma-separated remote file paths to copy (e.g. /var/log/syslog)")
+
+    # damf deploy
+    p_deploy = sub.add_parser(
+        "deploy",
+        help="Deploy files, folders, archives (.tar.gz/.zip), or inline content to one or all lab targets",
+    )
+    p_deploy.add_argument("--dest", required=True, help="Destination path on target(s) (e.g. /opt/lab_toolkit)")
+    p_deploy.add_argument("--src", help="Local file, folder, or archive (.tar.gz/.tgz/.tar/.zip) to deploy")
+    p_deploy.add_argument("--content", help="Inline text content to deploy directly")
+    p_deploy.add_argument("--filename", help="Target filename when deploying inline content")
+    p_deploy.add_argument("--all", action="store_true", help="Broadcast deploy to ALL online targets in the lab")
+    p_deploy.add_argument("--targets", default="", help="Comma-separated list of target device names")
+    p_deploy.add_argument("--type", dest="board_type", help="Filter broadcast deployment by board_type")
+    p_deploy.add_argument("--no-extract", action="store_true", help="Do not auto-extract .tar.gz/.zip archives on target")
+    p_deploy.add_argument("--chmod", help="Optional permissions to apply (e.g. 755)")
+    p_deploy.add_argument("--post-cmd", help="Optional command to run on target(s) after deployment")
+
     # damf discover
     p_disc = sub.add_parser("discover", help="Scan network (ARP/mDNS/Subnet), Serial, and ADB for boards")
     p_disc.add_argument("--subnet", help="Optional subnet CIDR to probe (e.g. 192.168.1.0/24)")
@@ -103,6 +180,174 @@ def _dispatch_cli(parser: argparse.ArgumentParser, args: argparse.Namespace, lab
                     f"{d.name:<24} {d.board_type:<18} {d.arch:<8} "
                     f"{(d.ip_address or '-'):<16} {d.transport:<10} {d.state:<10} {d.owner or '-'}"
                 )
+        return 0
+
+    if args.subcommand == "add-device":
+        peers = [p.strip() for p in args.connect_to.split(",") if p.strip()]
+        tags = [t.strip() for t in args.tags.split(",") if t.strip()]
+        spec = lab.define_device(
+            name=args.name,
+            board_type=args.board_type,
+            ip_address=args.ip_address,
+            subnet=args.subnet,
+            arch=args.arch,
+            transport=args.transport,
+            ssh_user=args.ssh_user,
+            ssh_port=args.ssh_port,
+            identity_file=args.identity_file,
+            os_hint=args.os_hint,
+            connected_to=peers,
+            tags=tags,
+            simulated=args.simulated,
+            serial_port=args.serial_port,
+            baudrate=args.baudrate,
+        )
+        print(
+            f"Defined device '{spec.name}' ({spec.board_type}, ip={spec.ip_address or 'N/A'}, "
+            f"subnet={spec.subnet}, peers={spec.connected_to})"
+        )
+        return 0
+
+    if args.subcommand == "link":
+        res = lab.link_devices(args.source, args.target)
+        print(f"Linked '{res['source']}' <-> '{res['target']}' in lab topology")
+        return 0
+
+    if args.subcommand == "ssh":
+        dev = lab.get_device(args.name)
+        if args.interactive:
+            import subprocess
+            from damf.transports import SSHTransport
+
+            ssh_t = dev.transport if isinstance(dev.transport, SSHTransport) else SSHTransport(dev.spec)
+            cmd_list = ssh_t.build_interactive_ssh_command()
+            return subprocess.call(cmd_list)
+        if args.command:
+            res = dev.run(args.command)
+            if res.stdout:
+                sys.stdout.write(res.stdout)
+            if res.stderr:
+                sys.stderr.write(res.stderr)
+            return res.returncode
+        info = lab.connect_ssh(args.name)
+        os_info = info.get("os_info", {})
+        print(f"Connected via SSH to {info['user']}@{info['host']}:{info['port']} ({info['device']})")
+        print(f"  Detected OS      : {os_info.get('pretty_name')} [kernel={os_info.get('kernel')}, init={os_info.get('init_system')}]")
+        print(f"  OS Reboot Command: {os_info.get('reboot_command')}")
+        print(f"  Interactive Shell: {info['interactive_cmd']}")
+        return 0
+
+    if args.subcommand == "serial":
+        dev = lab.get_device(args.name)
+        if args.interactive:
+            import subprocess
+            from damf.transports import SerialTransport
+
+            ser_t = dev.transport if isinstance(dev.transport, SerialTransport) else SerialTransport(dev.spec)
+            cmd_list = ser_t.build_interactive_serial_command()
+            return subprocess.call(cmd_list)
+        if args.command:
+            res = lab.run_serial(args.name, args.command)
+            if res["stdout"]:
+                sys.stdout.write(res["stdout"])
+            if res["stderr"]:
+                sys.stderr.write(res["stderr"])
+            return res["returncode"]
+        info = lab.connect_serial(args.name, auto_login=not args.no_login)
+        os_info = info.get("os_info", {})
+        print(
+            f"Connected via Serial to {info['device']} on {info['serial_port']} "
+            f"@ {info['baudrate']} ({info['databits']}{info['parity']}{info['stopbits']})"
+        )
+        print(f"  Console State    : {info['console_state']}")
+        if os_info.get("pretty_name"):
+            print(f"  Detected OS      : {os_info.get('pretty_name')} [kernel={os_info.get('kernel')}, init={os_info.get('init_system')}]")
+        print(f"  Interactive Term : {info['interactive_cmd']}")
+        return 0
+
+    if args.subcommand == "reboot":
+        info = lab.reboot_device(args.name, via_ssh=True, force_os_probe=args.force_probe)
+        os_info = info.get("os_info", {})
+        print(
+            f"Rebooted '{info['device']}' over SSH "
+            f"[OS: {os_info.get('pretty_name', 'Unix')}] using command: {info['reboot_command']}"
+        )
+        return info["returncode"]
+
+    if args.subcommand == "deploy-agent":
+        info = lab.deploy_agent(
+            args.name,
+            server_url=args.server,
+            interval=args.interval,
+            prefer_shell=args.shell,
+        )
+        print(
+            f"Deployed DAMF agent on '{info['device']}' "
+            f"(tier={info['agent_tier']}, script={info['remote_script']}, interval={info['interval']}s)"
+        )
+        return 0
+
+    if args.subcommand == "telemetry":
+        tel = lab.get_telemetry(args.name, refresh=args.refresh)
+        if args.json:
+            print(json.dumps(tel, indent=2))
+            return 0
+        print(f"=== Vital Telemetry: {tel['device']} (tier={tel.get('agent_tier')}, age={tel.get('heartbeat_age_sec')}s) ===")
+        print(f"  Load Avg (1/5/15m): {tel.get('load_1m')} / {tel.get('load_5m')} / {tel.get('load_15m')}")
+        print(f"  Memory Usage      : {tel.get('mem_used_mb')} / {tel.get('mem_total_mb')} MB ({tel.get('mem_percent')}%)")
+        print(f"  Disk Usage        : {tel.get('disk_used_gb')} / {tel.get('disk_total_gb')} GB ({tel.get('disk_percent')}%)")
+        print(f"  SoC Temperature   : {tel.get('cpu_temp_c', 'N/A')} °C | Uptime: {tel.get('uptime_seconds')}s")
+        print("  Recent System Logs:")
+        for line in tel.get("logs", []):
+            print(f"    {line}")
+        return 0
+
+    if args.subcommand == "copy-logs":
+        rfiles = [f.strip() for f in args.files.split(",") if f.strip()]
+        res = lab.copy_system_logs(
+            args.name,
+            output_dir=args.output_dir,
+            max_lines=args.lines,
+            remote_files=rfiles,
+        )
+        print(f"Copied system logs from '{res['device']}' -> {res['saved_path']}")
+        if res["copied_files"] and len(res["copied_files"]) > 1:
+            print(f"  Additional copied files: {', '.join(res['copied_files'][1:])}")
+        return 0
+
+    if args.subcommand == "deploy":
+        target_list = [t.strip() for t in args.targets.split(",") if t.strip()]
+        if args.all or len(target_list) > 1 or args.board_type or not target_list:
+            report = lab.deploy_to_lab(
+                remote_path=args.dest,
+                local_path=args.src,
+                content=args.content,
+                filename=args.filename,
+                extract_archive=not args.no_extract,
+                chmod=args.chmod,
+                post_deploy_cmd=args.post_cmd,
+                target_names=target_list or None,
+                board_type=args.board_type,
+            )
+            print(
+                f"Deployed to {report['succeeded']}/{report['total_targets']} lab target(s) "
+                f"-> {report['remote_path']} ({', '.join(report['targets'])})"
+            )
+            return 0 if report["failed"] == 0 else 1
+
+        single_res = lab.deploy_to_device(
+            name=target_list[0],
+            remote_path=args.dest,
+            local_path=args.src,
+            content=args.content,
+            filename=args.filename,
+            extract_archive=not args.no_extract,
+            chmod=args.chmod,
+            post_deploy_cmd=args.post_cmd,
+        )
+        print(
+            f"Deployed ({single_res['mode']}) to '{single_res['device']}' -> {single_res['remote_path']}"
+        )
         return 0
 
     if args.subcommand == "discover":
