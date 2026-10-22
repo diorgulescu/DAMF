@@ -101,6 +101,23 @@ class DAMFWebApp:
                     }
                 )
 
+            # API v1: Agent Heartbeat & Health Check
+            if method == "POST" and path == "/api/v1/agent/heartbeat":
+                spec = self.lab.record_heartbeat(payload)
+                return json_resp(
+                    {
+                        "ack": True,
+                        "device": spec.name,
+                        "state": spec.state,
+                        "last_seen": spec.last_seen,
+                    }
+                )
+
+            if method == "POST" and path == "/api/v1/agent/check-health":
+                timeout_sec = float(payload.get("timeout_seconds", 45.0))
+                marked = self.lab.check_agent_health(timeout_seconds=timeout_sec)
+                return json_resp({"marked_offline": marked})
+
             # API v1: Topology & Links
             if method == "GET" and path == "/api/v1/topology":
                 return json_resp(self.lab.topology())
@@ -221,6 +238,24 @@ class DAMFWebApp:
                 elif action == "connect" and method == "POST":
                     verify_auth = bool(payload.get("verify_auth", False))
                     info = self.lab.connect_ssh(dev_name, verify_auth=verify_auth)
+                    return json_resp(info)
+
+                elif action == "deploy-agent" and method == "POST":
+                    server_url = str(payload.get("server_url", "http://127.0.0.1:8080"))
+                    interval = int(payload.get("interval", 15))
+                    prefer_shell = bool(payload.get("prefer_shell", False))
+                    info = self.lab.deploy_agent(
+                        dev_name,
+                        server_url=server_url,
+                        interval=interval,
+                        prefer_shell=prefer_shell,
+                    )
+                    return json_resp(info)
+
+                elif action == "telemetry" and method == "GET":
+                    refresh = query.get("refresh", "").lower() in ("1", "true", "yes")
+                    lines = int(query.get("lines", "25"))
+                    info = self.lab.get_telemetry(dev_name, refresh=refresh, log_lines=lines)
                     return json_resp(info)
 
                 elif action == "reboot" and method == "POST":

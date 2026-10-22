@@ -14,6 +14,7 @@ from damf import (
     ADBScanner,
     ARPScanner,
     CommandResult,
+    DAMFAgent,
     DAMFWebApp,
     Device,
     DeviceBusyError,
@@ -26,9 +27,11 @@ from damf import (
     ResourcePool,
     ResultParser,
     SerialScanner,
+    collect_telemetry,
     create_http_server,
     determine_reboot_command,
     dump_yaml,
+    generate_posix_shell_agent,
     lookup_mac_vendor,
     normalize_mac,
     parse_os_probe_output,
@@ -472,6 +475,81 @@ class TestTopologySSHAndContextReboot(unittest.TestCase):
             )
             self.assertEqual(cli_main(["--db", str(db_file), "ssh", "ti-busybox-board"]), 0)
             self.assertEqual(cli_main(["--db", str(db_file), "reboot", "ti-busybox-board"]), 0)
+
+
+class TestTargetHeartbeatAgentAndTelemetry(unittest.TestCase):
+    """Tests for the two-tier target heartbeat agent, SSH deployment, telemetry, and offline detection."""
+
+    def test_agent_telemetry_collection_and_posix_shell_generator(self) -> None:
+        snap = collect_telemetry(device_name="rpi4-test", board_type="raspberry-pi-4", log_lines=5)
+        self.assertEqual(snap["device_name"], "rpi4-test")
+        self.assertIn("load_1m", snap)
+        self.assertIn("mem_percent", snap)
+        self.assertIsInstance(snap["logs"], list)
+
+        sh_script = generate_posix_shell_agent("http://192.168.10.1:8080", "ti-am335x-01", interval=10)
+        self.assertIn("#!/bin/sh", sh_script)
+        self.assertIn("/api/v1/agent/heartbeat", sh_script)
+        self.assertIn("ti-am335x-01", sh_script)
+
+    def test_agent_push_heartbeat_deploy_and_offline_timeout(self) -> None:
+        lab = Lab(db_path=":memory:", seed_demo=True)
+        web_app = DAMFWebApp(lab=lab)
+        client = RemoteLabClient(app=web_app)
+        try:
+            # 1. Push a heartbeat from DAMFAgent to the server
+            agent = DAMFAgent(device_name="rpi4-lab-01", app=web_app)
+            ack = agent.send_heartbeat(
+                {
+                    "device_name": "rpi4-lab-01",
+                    "load_1m": 1.42,
+                    "load_5m": 0.88,
+                    "load_15m": 0.45,
+                    "mem_total_mb": 4096.0,
+                    "mem_used_mb": 1024.0,
+                    "mem_percent": 25.0,
+                    "cpu_temp_c": 51.2,
+                    "uptime_seconds": 3600.0,
+                    "logs": ["[120.1] kernel: eth0 link becomes ready", "[125.0] systemd: target reached"],
+                }
+            )
+            self.assertTrue(ack["ack"])
+
+            # 2. Fetch vital telemetry via REST client
+            tel = client.get_telemetry("rpi4-lab-01")
+            self.assertEqual(tel["load_1m"], 1.42)
+            self.assertEqual(tel["cpu_temp_c"], 51.2)
+            self.assertEqual(len(tel["logs"]), 2)
+
+            # 3. Deploy Tier-1 (Python) agent on Debian board & Tier-2 (POSIX sh) agent on BusyBox board
+            dep_py = client.deploy_agent("rpi4-lab-01", server_url="http://192.168.10.1:8080", interval=15)
+            self.assertEqual(dep_py["agent_tier"], "python")
+
+            lab.define_device(
+                name="ti-minimal-busybox",
+                board_type="ti-am335x",
+                ip_address="192.168.10.199",
+                os_hint="busybox",
+                simulated=True,
+            )
+            dep_sh = client.deploy_agent("ti-minimal-busybox", server_url="http://192.168.10.1:8080", interval=15)
+            self.assertEqual(dep_sh["agent_tier"], "posix-sh")
+
+            # 4. Simulate missed heartbeats -> mark offline -> recover on next heartbeat
+            spec = lab.pool.get_device("ti-minimal-busybox")
+            assert spec is not None
+            spec.last_seen = time.time() - 120.0
+            lab.pool.register_device(spec, overwrite=True)
+
+            offline_list = lab.check_agent_health(timeout_seconds=45.0)
+            self.assertIn("ti-minimal-busybox", offline_list)
+            self.assertEqual(lab.pool.get_device("ti-minimal-busybox").state, "offline")  # type: ignore[union-attr]
+
+            # Next heartbeat brings it right back to 'available'
+            DAMFAgent(device_name="ti-minimal-busybox", app=web_app).send_heartbeat()
+            self.assertEqual(lab.pool.get_device("ti-minimal-busybox").state, "available")  # type: ignore[union-attr]
+        finally:
+            lab.close()
 
 
 if __name__ == "__main__":

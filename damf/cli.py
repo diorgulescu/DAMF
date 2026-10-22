@@ -68,6 +68,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_reb.add_argument("name", help="Target device name")
     p_reb.add_argument("--force-probe", action="store_true", help="Re-probe target OS before rebooting")
 
+    # damf deploy-agent
+    p_dep = sub.add_parser("deploy-agent", help="Deploy & start the heartbeat/telemetry agent on a target over SSH")
+    p_dep.add_argument("name", help="Target device name")
+    p_dep.add_argument("--server", default="http://127.0.0.1:8080", help="DAMF server URL for agent heartbeats")
+    p_dep.add_argument("--interval", type=int, default=15, help="Heartbeat interval in seconds")
+    p_dep.add_argument("--shell", action="store_true", help="Force Tier-2 POSIX/BusyBox shell agent")
+
+    # damf telemetry
+    p_tel = sub.add_parser("telemetry", help="Show vital target load, memory, temperature, and system logs")
+    p_tel.add_argument("name", help="Target device name")
+    p_tel.add_argument("--refresh", action="store_true", help="Query live telemetry from target")
+    p_tel.add_argument("--json", action="store_true", help="Output JSON")
+
     # damf discover
     p_disc = sub.add_parser("discover", help="Scan network (ARP/mDNS/Subnet), Serial, and ADB for boards")
     p_disc.add_argument("--subnet", help="Optional subnet CIDR to probe (e.g. 192.168.1.0/24)")
@@ -196,6 +209,34 @@ def _dispatch_cli(parser: argparse.ArgumentParser, args: argparse.Namespace, lab
             f"[OS: {os_info.get('pretty_name', 'Unix')}] using command: {info['reboot_command']}"
         )
         return info["returncode"]
+
+    if args.subcommand == "deploy-agent":
+        info = lab.deploy_agent(
+            args.name,
+            server_url=args.server,
+            interval=args.interval,
+            prefer_shell=args.shell,
+        )
+        print(
+            f"Deployed DAMF agent on '{info['device']}' "
+            f"(tier={info['agent_tier']}, script={info['remote_script']}, interval={info['interval']}s)"
+        )
+        return 0
+
+    if args.subcommand == "telemetry":
+        tel = lab.get_telemetry(args.name, refresh=args.refresh)
+        if args.json:
+            print(json.dumps(tel, indent=2))
+            return 0
+        print(f"=== Vital Telemetry: {tel['device']} (tier={tel.get('agent_tier')}, age={tel.get('heartbeat_age_sec')}s) ===")
+        print(f"  Load Avg (1/5/15m): {tel.get('load_1m')} / {tel.get('load_5m')} / {tel.get('load_15m')}")
+        print(f"  Memory Usage      : {tel.get('mem_used_mb')} / {tel.get('mem_total_mb')} MB ({tel.get('mem_percent')}%)")
+        print(f"  Disk Usage        : {tel.get('disk_used_gb')} / {tel.get('disk_total_gb')} GB ({tel.get('disk_percent')}%)")
+        print(f"  SoC Temperature   : {tel.get('cpu_temp_c', 'N/A')} °C | Uptime: {tel.get('uptime_seconds')}s")
+        print("  Recent System Logs:")
+        for line in tel.get("logs", []):
+            print(f"    {line}")
+        return 0
 
     if args.subcommand == "discover":
         found = lab.scan_and_register(

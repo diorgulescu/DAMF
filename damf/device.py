@@ -257,6 +257,118 @@ class Device:
             )
         return suite
 
+    def deploy_agent(
+        self,
+        server_url: str = "http://127.0.0.1:8080",
+        interval: int = 15,
+        prefer_shell: bool = False,
+    ) -> dict[str, Any]:
+        """Deploy and start the DAMF heartbeat/telemetry agent on this target over SSH/transport.
+
+        Automatically chooses Tier-1 (`damf/agent.py` stdlib Python) when `python3` is present on
+        the target, or falls back to Tier-2 (`damf-agent.sh` POSIX/BusyBox shell script).
+        """
+        from damf.agent import collect_telemetry, generate_posix_shell_agent
+        import tempfile
+
+        self.connect()
+        has_python3 = False
+        if not prefer_shell:
+            if self.spec.transport_config.get("simulated", False):
+                has_python3 = "busybox" not in str(self.spec.attributes.get("os", "")).lower()
+            else:
+                probe = self.run("command -v python3 >/dev/null 2>&1 && echo PY3_OK || echo NO_PY3", timeout=10.0)
+                has_python3 = "PY3_OK" in probe.stdout
+
+        if has_python3:
+            tier = "python"
+            remote_script = "/tmp/damf_agent.py"
+            local_agent = Path(__file__).parent / "agent.py"
+            self.upload(local_agent, remote_script)
+            start_cmd = (
+                f"chmod +x {remote_script}; "
+                f"nohup python3 {remote_script} --server {server_url} --name {self.name} "
+                f"--interval {int(interval)} >/tmp/damf-agent.log 2>&1 &"
+            )
+            self.run(start_cmd, timeout=10.0)
+        else:
+            tier = "posix-sh"
+            remote_script = "/tmp/damf_agent.sh"
+            sh_content = generate_posix_shell_agent(server_url=server_url, device_name=self.name, interval=interval)
+            with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False, encoding="utf-8") as tmp:
+                tmp.write(sh_content)
+                tmp_path = Path(tmp.name)
+            try:
+                self.upload(tmp_path, remote_script)
+            finally:
+                tmp_path.unlink(missing_ok=True)
+            start_cmd = f"chmod +x {remote_script}; nohup sh {remote_script} >/tmp/damf-agent.log 2>&1 &"
+            self.run(start_cmd, timeout=10.0)
+
+        self.spec.attributes["agent_active"] = True
+        self.spec.attributes["agent_tier"] = tier
+        self.spec.attributes["agent_server_url"] = server_url
+        if "telemetry" not in self.spec.attributes:
+            snap = collect_telemetry(device_name=self.name, board_type=self.board_type)
+            self.spec.attributes["telemetry"] = snap
+        self.spec.last_seen = time.time()
+        return {
+            "device": self.name,
+            "deployed": True,
+            "agent_tier": tier,
+            "remote_script": remote_script,
+            "interval": int(interval),
+            "server_url": server_url,
+        }
+
+    def fetch_telemetry(self, refresh: bool = False, log_lines: int = 25) -> dict[str, Any]:
+        """Return vital telemetry and system logs (from latest agent heartbeat or live SSH query)."""
+        from damf.agent import collect_telemetry
+
+        cached = self.spec.attributes.get("telemetry")
+        if cached and not refresh:
+            age = round(max(0.0, time.time() - float(cached.get("heartbeat_at", self.spec.last_seen or time.time()))), 1)
+            return {
+                "device": self.name,
+                "agent_active": bool(self.spec.attributes.get("agent_active", False)),
+                "agent_tier": self.spec.attributes.get("agent_tier", "python"),
+                "heartbeat_age_sec": age,
+                **cached,
+            }
+
+        if self.spec.transport_config.get("simulated", False):
+            snap = collect_telemetry(device_name=self.name, board_type=self.board_type, log_lines=log_lines)
+        else:
+            cmd = (
+                "awk '{print $1, $2, $3}' /proc/loadavg 2>/dev/null || echo '0.1 0.1 0.1'; "
+                "echo __DAMF_LOGS__; "
+                f"(dmesg 2>/dev/null | tail -n {int(log_lines)}) || echo 'no logs'"
+            )
+            res = self.run(cmd, timeout=10.0)
+            parts = res.stdout.split("__DAMF_LOGS__")
+            loads = parts[0].strip().split() if parts and parts[0].strip() else ["0.0", "0.0", "0.0"]
+            logs = parts[1].strip().splitlines() if len(parts) > 1 else []
+            snap = collect_telemetry(device_name=self.name, board_type=self.board_type, log_lines=log_lines)
+            try:
+                snap["load_1m"] = float(loads[0])
+                snap["load_5m"] = float(loads[1])
+                snap["load_15m"] = float(loads[2])
+            except (ValueError, IndexError):
+                pass
+            if logs:
+                snap["logs"] = logs
+
+        snap["heartbeat_at"] = time.time()
+        self.spec.attributes["telemetry"] = snap
+        self.spec.last_seen = snap["heartbeat_at"]
+        return {
+            "device": self.name,
+            "agent_active": bool(self.spec.attributes.get("agent_active", False)),
+            "agent_tier": self.spec.attributes.get("agent_tier", "ssh-live"),
+            "heartbeat_age_sec": 0.0,
+            **snap,
+        }
+
     def __repr__(self) -> str:
         return (
             f"<Device name={self.name!r} type={self.board_type!r} "

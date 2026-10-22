@@ -275,6 +275,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 <th>Board</th>
                 <th>Type / Arch</th>
                 <th>IP / SSH</th>
+                <th>Heartbeat / Vital Load</th>
                 <th>State</th>
                 <th>Owner</th>
               </tr>
@@ -283,13 +284,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </table>
         </div>
         <div class="card">
-          <h3 style="margin-top:0">SSH &amp; Target Operations Console</h3>
+          <h3 style="margin-top:0">SSH, Agent Telemetry &amp; Target Console</h3>
           <label>Target Device</label>
           <select id="quick-device"></select>
           <div style="display:flex; gap:0.45rem; flex-wrap:wrap; margin-bottom:0.65rem;">
             <button class="btn" onclick="connectSelectedSSH()">Connect SSH &amp; Detect OS</button>
+            <button class="btn btn-secondary" onclick="deploySelectedAgent()">Deploy Agent (SSH)</button>
+            <button class="btn btn-secondary" onclick="viewSelectedTelemetry()">Vital Telemetry &amp; Logs</button>
             <button class="btn btn-warning" onclick="rebootSelectedSSH()">Reboot Target (SSH)</button>
-            <button class="btn btn-secondary" onclick="runQuickTestSuite()">Run Smoke Suite</button>
           </div>
           <label>Shell / SSH / ADB Command</label>
           <input id="quick-cmd" value="uname -a && cat /etc/os-release" />
@@ -548,10 +550,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const user = (d.transport_config && d.transport_config.user) || 'root';
         const port = (d.transport_config && d.transport_config.port) || 22;
         const endpoint = d.ip_address ? `${user}@${d.ip_address}:${port}` : 'local';
+        const tel = (d.attributes && d.attributes.telemetry) || null;
+        const vitalBadge = tel
+          ? `<span class="tag">load: ${tel.load_1m}</span><span class="tag">ram: ${tel.mem_percent}%</span>` +
+            (tel.cpu_temp_c !== null && tel.cpu_temp_c !== undefined ? `<span class="tag">${tel.cpu_temp_c}°C</span>` : '')
+          : `<span style="color:var(--muted); font-size:0.78rem;">No agent</span>`;
         dashBody.innerHTML += `<tr>
           <td><strong>${d.name}</strong></td>
           <td>${d.board_type} <span class="tag">${d.arch}</span></td>
           <td><code>${endpoint}</code> <span class="tag">${d.transport}</span></td>
+          <td>${vitalBadge}</td>
           <td><span class="pill ${pillClass}">${d.state}</span></td>
           <td>${d.owner || '—'}</td>
         </tr>`;
@@ -671,6 +679,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const user = (d.transport_config && d.transport_config.user) || 'root';
       const port = (d.transport_config && d.transport_config.port) || 22;
       const osInfo = (d.attributes && d.attributes.os_info) || {};
+      const tel = (d.attributes && d.attributes.telemetry) || {};
       const lastReboot = (d.attributes && d.attributes.last_reboot_command) || osInfo.reboot_command || 'Auto-detect on reboot';
       const el = document.getElementById('node-inspector');
       el.innerHTML = `
@@ -679,11 +688,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <p><strong>SSH Endpoint:</strong> <code>ssh -p ${port} ${user}@${d.ip_address || 'local'}</code></p>
         <p><strong>Subnet:</strong> ${d.subnet}</p>
         <p><strong>State / Power:</strong> ${d.state} / ${d.power_state}</p>
+        <p><strong>Vital Telemetry:</strong> Load <code>${tel.load_1m ?? '—'} / ${tel.load_5m ?? '—'} / ${tel.load_15m ?? '—'}</code> • RAM <code>${tel.mem_percent ?? '—'}%</code> • Temp <code>${tel.cpu_temp_c ?? '—'}°C</code></p>
         <p><strong>Detected OS:</strong> ${osInfo.pretty_name || d.deployed_image || 'Not probed yet'}</p>
         <p><strong>OS Reboot Cmd:</strong> <code>${lastReboot}</code></p>
         <p><strong>Connected Peers:</strong> ${(d.connected_to || []).join(', ') || 'None'}</p>
         <div style="display:flex; gap:0.4rem; flex-wrap:wrap; margin-top:0.65rem;">
           <button class="btn" onclick="connectDeviceSSH('${d.name}')">Connect SSH &amp; Probe OS</button>
+          <button class="btn btn-secondary" onclick="viewDeviceTelemetry('${d.name}')">Vital Logs &amp; Load</button>
+          <button class="btn btn-secondary" onclick="deployDeviceAgent('${d.name}')">Deploy Agent</button>
           <button class="btn btn-warning" onclick="rebootDeviceSSH('${d.name}')">Reboot via SSH</button>
           <a class="btn btn-secondary" href="/api/v1/devices/${encodeURIComponent(d.name)}/export" target="_blank" style="text-decoration:none;">Export YAML</a>
         </div>
@@ -720,6 +732,41 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     async function rebootSelectedSSH() {
       const dev = document.getElementById('quick-device').value;
       if (dev) await rebootDeviceSSH(dev);
+    }
+
+    async function deployDeviceAgent(name) {
+      const res = await api(`/api/v1/devices/${encodeURIComponent(name)}/deploy-agent`, 'POST', {
+        server_url: window.location.origin,
+        interval: 15
+      });
+      document.getElementById('quick-output').textContent =
+        `[Agent Deployed on ${res.device}]\\n` +
+        `Tier: ${res.agent_tier} (${res.remote_script})\\n` +
+        `Heartbeat Interval: ${res.interval}s -> ${res.server_url}/api/v1/agent/heartbeat`;
+      await refreshAll();
+    }
+
+    async function viewDeviceTelemetry(name) {
+      const t = await api(`/api/v1/devices/${encodeURIComponent(name)}/telemetry?refresh=1`);
+      const logs = (t.logs || []).join('\\n');
+      document.getElementById('quick-output').textContent =
+        `=== Vital Telemetry for ${t.device} (tier=${t.agent_tier}, heartbeat_age=${t.heartbeat_age_sec}s) ===\\n` +
+        `Load Average : ${t.load_1m} (1m), ${t.load_5m} (5m), ${t.load_15m} (15m)\\n` +
+        `Memory Usage : ${t.mem_used_mb} / ${t.mem_total_mb} MB (${t.mem_percent}%)\\n` +
+        `Disk Usage   : ${t.disk_used_gb} / ${t.disk_total_gb} GB (${t.disk_percent}%)\\n` +
+        `SoC Temp     : ${t.cpu_temp_c ?? 'N/A'} °C | Uptime: ${t.uptime_seconds}s\\n` +
+        `--- Recent System / Kernel Logs ---\\n${logs}`;
+      await refreshAll();
+    }
+
+    async function deploySelectedAgent() {
+      const dev = document.getElementById('quick-device').value;
+      if (dev) await deployDeviceAgent(dev);
+    }
+
+    async function viewSelectedTelemetry() {
+      const dev = document.getElementById('quick-device').value;
+      if (dev) await viewDeviceTelemetry(dev);
     }
 
     async function reserveDevice(name) {

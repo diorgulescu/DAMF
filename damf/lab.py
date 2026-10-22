@@ -193,6 +193,34 @@ class Lab:
             "stderr": res.stderr,
         }
 
+    def record_heartbeat(self, payload: dict[str, Any]) -> DeviceSpec:
+        """Process an incoming heartbeat from a target agent and update device telemetry."""
+        return self.pool.record_heartbeat(payload)
+
+    def check_agent_health(self, timeout_seconds: float = 45.0) -> list[str]:
+        """Mark agent-monitored boards as offline if they missed heartbeats for `timeout_seconds`."""
+        return self.pool.mark_stale_agents_offline(timeout_seconds=timeout_seconds)
+
+    def deploy_agent(
+        self,
+        name: str,
+        server_url: str = "http://127.0.0.1:8080",
+        interval: int = 15,
+        prefer_shell: bool = False,
+    ) -> dict[str, Any]:
+        """Deploy and start the DAMF heartbeat/telemetry agent on `name` over SSH."""
+        dev = self.get_device(name)
+        info = dev.deploy_agent(server_url=server_url, interval=interval, prefer_shell=prefer_shell)
+        self.pool.register_device(dev.spec, overwrite=True)
+        return info
+
+    def get_telemetry(self, name: str, refresh: bool = False, log_lines: int = 25) -> dict[str, Any]:
+        """Get vital telemetry (CPU load, RAM, Temp, Uptime, System Logs) for `name`."""
+        dev = self.get_device(name)
+        info = dev.fetch_telemetry(refresh=refresh, log_lines=log_lines)
+        self.pool.register_device(dev.spec, overwrite=True)
+        return info
+
     def devices(
         self,
         board_type: str | None = None,
@@ -422,3 +450,26 @@ class RemoteLabClient:
             f"/api/v1/devices/{urllib.parse.quote(name)}/reboot",
             {"via_ssh": via_ssh},
         )
+
+    def send_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Send an agent heartbeat payload to `/api/v1/agent/heartbeat`."""
+        return self._request("POST", "/api/v1/agent/heartbeat", payload)
+
+    def deploy_agent(
+        self,
+        name: str,
+        server_url: str = "http://127.0.0.1:8080",
+        interval: int = 15,
+        prefer_shell: bool = False,
+    ) -> dict[str, Any]:
+        """Deploy the target heartbeat agent over SSH via the REST API."""
+        return self._request(
+            "POST",
+            f"/api/v1/devices/{urllib.parse.quote(name)}/deploy-agent",
+            {"server_url": server_url, "interval": interval, "prefer_shell": prefer_shell},
+        )
+
+    def get_telemetry(self, name: str, refresh: bool = False) -> dict[str, Any]:
+        """Fetch vital load, memory, temperature, and system logs for `name`."""
+        suffix = "?refresh=1" if refresh else ""
+        return self._request("GET", f"/api/v1/devices/{urllib.parse.quote(name)}/telemetry{suffix}")
