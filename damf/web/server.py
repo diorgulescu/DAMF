@@ -258,6 +258,22 @@ class DAMFWebApp:
                     info = self.lab.get_telemetry(dev_name, refresh=refresh, log_lines=lines)
                     return json_resp(info)
 
+                elif action == "logs":
+                    max_lines = int(payload.get("max_lines") or query.get("lines") or 200)
+                    remote_files = payload.get("remote_files")
+                    if not remote_files and query.get("files"):
+                        remote_files = [f.strip() for f in query["files"].split(",") if f.strip()]
+                    output_dir = payload.get("output_dir") or query.get("output_dir")
+                    info = self.lab.copy_system_logs(
+                        dev_name,
+                        output_dir=output_dir,
+                        max_lines=max_lines,
+                        remote_files=remote_files,
+                    )
+                    if method == "GET" and query.get("format", "").lower() in ("raw", "text", "download"):
+                        return 200, "text/plain; charset=utf-8", info["combined_text"].encode("utf-8")
+                    return json_resp(info)
+
                 elif action == "reboot" and method == "POST":
                     via_ssh = bool(payload.get("via_ssh", True))
                     force_os = bool(payload.get("force_os_probe", False))

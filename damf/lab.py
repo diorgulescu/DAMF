@@ -221,6 +221,19 @@ class Lab:
         self.pool.register_device(dev.spec, overwrite=True)
         return info
 
+    def copy_system_logs(
+        self,
+        name: str,
+        output_dir: str | Path | None = None,
+        max_lines: int = 200,
+        remote_files: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """On-demand copy of system/kernel logs from target `name` to `output_dir` (and pool cache)."""
+        dev = self.get_device(name)
+        info = dev.copy_system_logs(output_dir=output_dir, max_lines=max_lines, remote_files=remote_files)
+        self.pool.register_device(dev.spec, overwrite=True)
+        return info
+
     def devices(
         self,
         board_type: str | None = None,
@@ -473,3 +486,28 @@ class RemoteLabClient:
         """Fetch vital load, memory, temperature, and system logs for `name`."""
         suffix = "?refresh=1" if refresh else ""
         return self._request("GET", f"/api/v1/devices/{urllib.parse.quote(name)}/telemetry{suffix}")
+
+    def copy_system_logs(
+        self,
+        name: str,
+        output_dir: str | Path | None = None,
+        max_lines: int = 200,
+        remote_files: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Request on-demand system log collection from target `name` via the REST API and optionally save locally."""
+        resp = self._request(
+            "POST",
+            f"/api/v1/devices/{urllib.parse.quote(name)}/logs",
+            {
+                "max_lines": max_lines,
+                "remote_files": remote_files or [],
+                "output_dir": str(output_dir) if output_dir else None,
+            },
+        )
+        if output_dir is not None and not resp.get("saved_path"):
+            out_dir = Path(output_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_file = out_dir / f"{name}_system_logs.log"
+            out_file.write_text(resp.get("combined_text", ""), encoding="utf-8")
+            resp["saved_path"] = str(out_file)
+        return resp

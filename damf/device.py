@@ -369,6 +369,115 @@ class Device:
             **snap,
         }
 
+    def copy_system_logs(
+        self,
+        output_dir: str | Path | None = None,
+        max_lines: int = 200,
+        remote_files: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Copy system and kernel logs on demand from the target to the host.
+
+        Collects `dmesg`, `journalctl`, `/var/log/syslog`, `/var/log/messages` (or `logcat`
+        on Android targets), optionally copies explicit `remote_files` via SCP/ADB/Serial,
+        and writes a consolidated log bundle file when `output_dir` is specified.
+        """
+        now = time.time()
+        ts_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(now))
+        sources: dict[str, str] = {}
+        copied_files: list[str] = []
+
+        if self.spec.transport_config.get("simulated", False):
+            tel_logs = (self.spec.attributes.get("telemetry") or {}).get("logs") or [
+                f"[00:00:01] kernel: Linux version 6.6.20 on {self.name} ({self.arch})",
+                f"[00:00:03] systemd[1]: Reached target Multi-User System on {self.name}.",
+            ]
+            sources["dmesg"] = "\n".join(tel_logs)
+            if self.spec.transport == "adb":
+                sources["logcat"] = f"I/ActivityManager: Simulated Android logcat on {self.name}"
+            else:
+                sources["syslog"] = (
+                    f"{time.strftime('%b %d %H:%M:%S')} {self.name} kernel: eth0 link up\n"
+                    f"{time.strftime('%b %d %H:%M:%S')} {self.name} sshd: Accepted key for "
+                    f"{self.spec.transport_config.get('user', 'root')}"
+                )
+        elif self.spec.transport == "adb":
+            lc = self.run(f"logcat -d -t {int(max_lines)}", timeout=15.0)
+            dm = self.run(f"dmesg | tail -n {int(max_lines)}", timeout=15.0)
+            if lc.stdout.strip():
+                sources["logcat"] = lc.stdout.strip()
+            if dm.stdout.strip():
+                sources["dmesg"] = dm.stdout.strip()
+        else:
+            os_info = self.detect_os()
+            sudo = "" if str(self.spec.transport_config.get("user", "root")) == "root" else "sudo -n "
+            collect_script = (
+                f"echo __DAMF_SRC_DMESG__; ({sudo}dmesg 2>/dev/null || dmesg 2>/dev/null) | tail -n {int(max_lines)}; "
+                f"echo __DAMF_SRC_SYSLOG__; ({sudo}tail -n {int(max_lines)} /var/log/syslog /var/log/messages 2>/dev/null || true); "
+                f"echo __DAMF_SRC_JOURNAL__; ({sudo}journalctl -n {int(max_lines)} --no-pager 2>/dev/null || true); "
+                f"echo __DAMF_SRC_AGENT__; (tail -n {int(max_lines)} /tmp/damf-agent.log 2>/dev/null || true)"
+            )
+            res = self.run(collect_script, timeout=20.0)
+            current = ""
+            buf: list[str] = []
+            marker_map = {
+                "__DAMF_SRC_DMESG__": "dmesg",
+                "__DAMF_SRC_SYSLOG__": "syslog",
+                "__DAMF_SRC_JOURNAL__": "journalctl",
+                "__DAMF_SRC_AGENT__": "damf_agent",
+            }
+            for line in res.stdout.splitlines():
+                stripped = line.strip()
+                if stripped in marker_map:
+                    if current and "\n".join(buf).strip():
+                        sources[current] = "\n".join(buf).strip()
+                    current = marker_map[stripped]
+                    buf = []
+                else:
+                    buf.append(line)
+            if current and "\n".join(buf).strip():
+                sources[current] = "\n".join(buf).strip()
+            sources.setdefault("os_summary", f"OS: {os_info.get('pretty_name', 'Unknown')}")
+
+        # Build combined formatted log bundle text
+        sections_text: list[str] = [
+            f"# DAMF System Log Bundle — Device: {self.name} ({self.board_type})",
+            f"# Collected At: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}",
+            "",
+        ]
+        for src_name, content in sources.items():
+            sections_text.append(f"==================== [{src_name.upper()}] ====================")
+            sections_text.append(content)
+            sections_text.append("")
+        combined_text = "\n".join(sections_text)
+
+        saved_path_str = ""
+        if output_dir is not None:
+            out_dir = Path(output_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            bundle_file = out_dir / f"{self.name}_system_logs_{ts_str}.log"
+            bundle_file.write_text(combined_text, encoding="utf-8")
+            saved_path_str = str(bundle_file)
+            copied_files.append(saved_path_str)
+
+            for rfile in remote_files or []:
+                local_target = out_dir / f"{self.name}_{Path(rfile).name}"
+                if self.spec.transport_config.get("simulated", False):
+                    local_target.write_text(f"# Simulated copy of {rfile} from {self.name}\n{combined_text}", encoding="utf-8")
+                else:
+                    self.download(rfile, local_target)
+                copied_files.append(str(local_target))
+
+        result = {
+            "device": self.name,
+            "collected_at": now,
+            "sources": sources,
+            "combined_text": combined_text,
+            "saved_path": saved_path_str,
+            "copied_files": copied_files,
+        }
+        self.spec.attributes["last_collected_logs"] = result
+        return result
+
     def __repr__(self) -> str:
         return (
             f"<Device name={self.name!r} type={self.board_type!r} "

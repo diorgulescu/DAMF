@@ -290,7 +290,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <div style="display:flex; gap:0.45rem; flex-wrap:wrap; margin-bottom:0.65rem;">
             <button class="btn" onclick="connectSelectedSSH()">Connect SSH &amp; Detect OS</button>
             <button class="btn btn-secondary" onclick="deploySelectedAgent()">Deploy Agent (SSH)</button>
-            <button class="btn btn-secondary" onclick="viewSelectedTelemetry()">Vital Telemetry &amp; Logs</button>
+            <button class="btn btn-secondary" onclick="viewSelectedTelemetry()">Vital Telemetry</button>
+            <button class="btn btn-secondary" onclick="copySelectedSystemLogs()">Copy System Logs</button>
             <button class="btn btn-warning" onclick="rebootSelectedSSH()">Reboot Target (SSH)</button>
           </div>
           <label>Shell / SSH / ADB Command</label>
@@ -591,6 +592,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <td style="display:flex; gap:0.35rem; flex-wrap:wrap;">
             ${resBtn}
             <button class="btn btn-secondary" onclick="connectDeviceSSH('${d.name}')">SSH Connect</button>
+            <button class="btn btn-secondary" onclick="copyDeviceSystemLogs('${d.name}')">Copy System Logs</button>
             <button class="btn btn-warning" onclick="rebootDeviceSSH('${d.name}')">Reboot (SSH)</button>
             <button class="btn btn-secondary" onclick="powerDevice('${d.name}', '${pwrAction}')">Power ${pwrAction.toUpperCase()}</button>
             <button class="btn btn-secondary" onclick="populateEdit('${d.name}')">Edit</button>
@@ -694,7 +696,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <p><strong>Connected Peers:</strong> ${(d.connected_to || []).join(', ') || 'None'}</p>
         <div style="display:flex; gap:0.4rem; flex-wrap:wrap; margin-top:0.65rem;">
           <button class="btn" onclick="connectDeviceSSH('${d.name}')">Connect SSH &amp; Probe OS</button>
-          <button class="btn btn-secondary" onclick="viewDeviceTelemetry('${d.name}')">Vital Logs &amp; Load</button>
+          <button class="btn btn-secondary" onclick="viewDeviceTelemetry('${d.name}')">Vital Load</button>
+          <button class="btn btn-secondary" onclick="copyDeviceSystemLogs('${d.name}')">Copy System Logs</button>
+          <a class="btn btn-secondary" href="/api/v1/devices/${encodeURIComponent(d.name)}/logs?format=download" target="_blank" style="text-decoration:none;">Download .log</a>
           <button class="btn btn-secondary" onclick="deployDeviceAgent('${d.name}')">Deploy Agent</button>
           <button class="btn btn-warning" onclick="rebootDeviceSSH('${d.name}')">Reboot via SSH</button>
           <a class="btn btn-secondary" href="/api/v1/devices/${encodeURIComponent(d.name)}/export" target="_blank" style="text-decoration:none;">Export YAML</a>
@@ -767,6 +771,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     async function viewSelectedTelemetry() {
       const dev = document.getElementById('quick-device').value;
       if (dev) await viewDeviceTelemetry(dev);
+    }
+
+    async function copyDeviceSystemLogs(name) {
+      const res = await api(`/api/v1/devices/${encodeURIComponent(name)}/logs`, 'POST', { max_lines: 200 });
+      document.getElementById('quick-output').textContent = res.combined_text || 'No logs returned.';
+    }
+
+    async function copySelectedSystemLogs() {
+      const dev = document.getElementById('quick-device').value;
+      if (dev) await copyDeviceSystemLogs(dev);
     }
 
     async function reserveDevice(name) {

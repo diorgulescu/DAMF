@@ -81,6 +81,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_tel.add_argument("--refresh", action="store_true", help="Query live telemetry from target")
     p_tel.add_argument("--json", action="store_true", help="Output JSON")
 
+    # damf copy-logs
+    p_logs = sub.add_parser("copy-logs", help="Copy system/kernel logs on demand from a target board")
+    p_logs.add_argument("name", help="Target device name")
+    p_logs.add_argument("-o", "--output-dir", default="./logs", help="Local directory to save copied log bundle")
+    p_logs.add_argument("-n", "--lines", type=int, default=200, help="Max lines per log source (default: 200)")
+    p_logs.add_argument("--files", default="", help="Optional comma-separated remote file paths to copy (e.g. /var/log/syslog)")
+
     # damf discover
     p_disc = sub.add_parser("discover", help="Scan network (ARP/mDNS/Subnet), Serial, and ADB for boards")
     p_disc.add_argument("--subnet", help="Optional subnet CIDR to probe (e.g. 192.168.1.0/24)")
@@ -236,6 +243,19 @@ def _dispatch_cli(parser: argparse.ArgumentParser, args: argparse.Namespace, lab
         print("  Recent System Logs:")
         for line in tel.get("logs", []):
             print(f"    {line}")
+        return 0
+
+    if args.subcommand == "copy-logs":
+        rfiles = [f.strip() for f in args.files.split(",") if f.strip()]
+        res = lab.copy_system_logs(
+            args.name,
+            output_dir=args.output_dir,
+            max_lines=args.lines,
+            remote_files=rfiles,
+        )
+        print(f"Copied system logs from '{res['device']}' -> {res['saved_path']}")
+        if res["copied_files"] and len(res["copied_files"]) > 1:
+            print(f"  Additional copied files: {', '.join(res['copied_files'][1:])}")
         return 0
 
     if args.subcommand == "discover":

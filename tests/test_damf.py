@@ -551,6 +551,56 @@ class TestTargetHeartbeatAgentAndTelemetry(unittest.TestCase):
         finally:
             lab.close()
 
+    def test_on_demand_copy_system_logs_sdk_api_and_cli(self) -> None:
+        lab = Lab(db_path=":memory:", seed_demo=True)
+        web_app = DAMFWebApp(lab=lab)
+        client = RemoteLabClient(app=web_app)
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                # 1. Copy system logs via Python SDK (Linux SSH target + explicit remote file copy)
+                bundle = lab.copy_system_logs(
+                    "rpi4-lab-01",
+                    output_dir=tmpdir,
+                    max_lines=100,
+                    remote_files=["/var/log/syslog"],
+                )
+                self.assertIn("dmesg", bundle["sources"])
+                self.assertIn("syslog", bundle["sources"])
+                self.assertTrue(Path(bundle["saved_path"]).exists())
+                self.assertEqual(len(bundle["copied_files"]), 2)
+
+                # 2. Copy system logs from Android target (captures logcat + dmesg)
+                android_bundle = client.copy_system_logs("pixel-7-testphone", output_dir=tmpdir)
+                self.assertIn("logcat", android_bundle["sources"])
+                self.assertTrue(Path(android_bundle["saved_path"]).exists())
+
+                # 3. Direct raw .log file download endpoint from Administrative UI
+                status, ctype, raw_bytes = web_app.handle_request(
+                    "GET",
+                    "/api/v1/devices/rpi4-lab-01/logs?format=download",
+                )
+                self.assertEqual(status, 200)
+                self.assertIn("text/plain", ctype)
+                self.assertIn(b"[DMESG]", raw_bytes)
+
+                # 4. CLI `damf copy-logs`
+                self.assertEqual(
+                    cli_main(
+                        [
+                            "--db",
+                            ":memory:",
+                            "--seed-demo",
+                            "copy-logs",
+                            "rpi4-lab-01",
+                            "-o",
+                            tmpdir,
+                        ]
+                    ),
+                    0,
+                )
+        finally:
+            lab.close()
+
 
 if __name__ == "__main__":
     unittest.main()
