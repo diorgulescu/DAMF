@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sys
 
-from app import app
 from damf.cli import main as cli_main
 
 if __name__ == "__main__":

@@ -304,7 +304,7 @@ class TestStep5WebServerCLIAndLegacy(unittest.TestCase):
         finally:
             lab.close()
 
-    def test_cli_commands_and_legacy_flow(self) -> None:
+    def test_cli_commands_and_run_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_file = Path(tmpdir) / "cli.db"
             self.assertEqual(cli_main(["--db", str(db_file), "--seed-demo", "devices", "--json"]), 0)
@@ -314,24 +314,17 @@ class TestStep5WebServerCLIAndLegacy(unittest.TestCase):
             )
             self.assertEqual(cli_main(["--db", str(db_file), "release", "rpi4-lab-01"]), 0)
 
-            # Test legacy DeviceManager + TestRequest flow
-            cfg_file = Path(tmpdir) / "cfg.yml"
             job_file = Path(tmpdir) / "job.yml"
-            cfg_file.write_text(
-                f"workspace:\n  root_path: {tmpdir}/ws_\n  logs_dir: logs\n  git_dir: git\n  test_results_dir: test_results\n  temp_dir: tmp\nglobal_settings:\n  board_files_path: {tmpdir}\n",
-                encoding="utf-8",
-            )
+            out_dir = Path(tmpdir) / "test_results"
             job_file.write_text(
-                "boards:\n  master: raspberry-pi-4\ninstance_config:\n  master:\n    boot_method: ramdisk\ntests:\n  master:\n    - uname\n",
+                "suite_name: rpi_smoke\nboard_type: raspberry-pi-4\ncommands:\n  - uname -a\n",
                 encoding="utf-8",
             )
-            from DeviceManager import DeviceManager
-
-            dm = DeviceManager.DeviceManager(str(cfg_file), debug=True)
-            dm.submit_test_request(safe_load_yaml(job_file.read_text(encoding="utf-8")))
-            xml_report = Path(dm.workspace) / "test_results" / "uname.xml"
-            self.assertTrue(xml_report.exists())
-            dm.resource_pool.close()
+            self.assertEqual(
+                cli_main(["--db", str(db_file), "run-job", str(job_file), "--output-dir", str(out_dir)]),
+                0,
+            )
+            self.assertTrue((out_dir / "rpi_smoke.xml").exists())
 
 
 class TestTopologySSHAndContextReboot(unittest.TestCase):

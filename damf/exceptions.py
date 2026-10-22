@@ -40,7 +40,6 @@ class ImageLoadFailed(DAMFError):
         if msg is None:
             msg = f"Failed to load image '{image_name}' onto target '{target}' from '{path}'"
         super().__init__(msg)
-        self.imageName = image_name
         self.image_name = image_name
         self.path = path
         self.target = target

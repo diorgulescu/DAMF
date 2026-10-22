@@ -617,24 +617,6 @@ class ResourcePool:
     def board_types(self) -> list[str]:
         return sorted({d.board_type for d in self.list_devices()})
 
-    def get_board_by_type(self, board_type: str) -> str:
-        """Legacy helper: return the name of the first available board of `board_type`."""
-        matches = self.list_devices(board_type=board_type, state=DeviceState.AVAILABLE.value)
-        if not matches:
-            all_matches = self.list_devices(board_type=board_type)
-            if not all_matches:
-                raise DeviceNotFoundError(f"No board of type '{board_type}' found in ResourcePool")
-            return all_matches[0].name
-        return matches[0].name
-
-    def find_available_boards(self) -> list[str]:
-        return [d.name for d in self.list_devices(state=DeviceState.AVAILABLE.value)]
-
-    def find_board_types(self) -> list[str]:
-        types = self.board_types
-        self.logger.info("Done reading available board types: %s", types)
-        return types
-
     def seed_demo_devices(self) -> list[DeviceSpec]:
         """Seed representative lab devices (Raspberry Pi, TI Sitara, BeagleBone, Android) if empty."""
         if self.list_devices():

@@ -24,9 +24,8 @@ dependencies = []
 
 [project.optional-dependencies]
 yaml = ["PyYAML>=6.0"]
-serial = ["pyserial>=3.5", "pexpect>=4.8"]
+serial = ["pyserial>=3.5"]
 discovery = ["zeroconf>=0.131.0"]
-web = ["Flask>=3.0", "Flask-SQLAlchemy>=3.1", "Flask-Migrate>=4.0", "Flask-WTF>=1.2"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]

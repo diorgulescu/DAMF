@@ -1,0 +1,24 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+test_results/
+reports/
+logs/
+
+# Local databases & OS metadata
+*.db
+*.sqlite
+*.sqlite3
+.DS_Store
